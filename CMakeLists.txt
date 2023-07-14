@@ -79,6 +79,7 @@ set(HERMES_SOURCES
     src/collisions.cxx
     src/anomalous_diffusion.cxx
     src/binormal_stpm.cxx
+    src/background_phi.cxx
     src/recycling.cxx
     src/amjuel_hyd_ionisation.cxx
     src/amjuel_hyd_recombination.cxx
@@ -105,6 +106,7 @@ set(HERMES_SOURCES
     include/amjuel_reaction.hxx
     include/anomalous_diffusion.hxx
     include/binormal_stpm.hxx
+    include/background_phi.hxx
     include/collisions.hxx
     include/component.hxx
     include/component_scheduler.hxx

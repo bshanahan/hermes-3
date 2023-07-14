@@ -30,6 +30,7 @@
 #include "include/amjuel_hyd_recombination.hxx"
 #include "include/anomalous_diffusion.hxx"
 #include "include/binormal_stpm.hxx"
+#include "include/background_phi.hxx"
 #include "include/collisions.hxx"
 #include "include/diamagnetic_drift.hxx"
 #include "include/electromagnetic.hxx"
