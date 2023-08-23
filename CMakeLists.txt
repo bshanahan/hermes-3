@@ -49,6 +49,7 @@ else()
 endif()
 
 set(HERMES_SOURCES
+    src/classical_diffusion.cxx
     src/component.cxx
     src/component_scheduler.cxx
     src/ionisation.cxx
@@ -105,6 +106,7 @@ set(HERMES_SOURCES
     include/amjuel_hyd_recombination.hxx
     include/amjuel_reaction.hxx
     include/anomalous_diffusion.hxx
+    include/classical_diffusion.hxx
     include/binormal_stpm.hxx
     include/background_phi.hxx
     include/collisions.hxx

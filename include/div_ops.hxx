@@ -46,14 +46,19 @@ const Field3D Div_n_bxGrad_f_B_XPPM(const Field3D& n, const Field3D& f,
 
 const Field3D Div_Perp_Lap_FV_Index(const Field3D& a, const Field3D& f, bool xflux);
 
+const Field3D Div_Z_FV_Index(const Field3D& a, const Field3D& f);
+
 // 4th-order flux conserving term, in index space
 const Field3D D4DX4_FV_Index(const Field3D& f, bool bndry_flux = false);
+const Field3D D4DZ4_Index(const Field3D& f);
 
 // Div ( k * Grad(f) )
 const Field2D Laplace_FV(const Field2D& k, const Field2D& f);
 
 /// Perpendicular diffusion including X and Y directions
 const Field3D Div_a_Grad_perp_upwind(const Field3D& a, const Field3D& f);
+/// Version of function that returns flows
+const Field3D Div_a_Grad_perp_upwind_flows(const Field3D& a, const Field3D& f, Field3D& flux_xlow, Field3D& flux_ylow);
 
 namespace FV {
 
