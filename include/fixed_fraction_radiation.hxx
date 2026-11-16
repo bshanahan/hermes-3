@@ -29,6 +29,30 @@ struct HutchinsonCarbon {
   static constexpr std::string_view type = "hutchinson_carbon";
 };
 
+/// Analytic cooling curve described as the default fixed-fraction model in SOLPS by
+/// J.D. Lore et al., Nucl. Fusion 64 (2024) 126054, section 3.3:
+///
+///   L_Z(Te) = 2e-32 / (That^(3/2) + That^(-3)),  That = Te / 15 eV
+///
+/// "This function peaks [near] Tnorm and roughly approximates the cooling curve for nitrogen."
+/// Assumed here to be in W m^3 (the paper does not state the unit); the peak is 1.06e-32 W m^3
+/// at Te = 17.5 eV.
+///
+/// Input: Electron temperature [eV]
+/// Output: Radiation cooling curve [Wm^3]
+///         (multiply by Ne * Ni to get W/m^3)
+struct SolpsDefaultCooling {
+  BoutReal curve(BoutReal Te) {
+    if (Te <= 0.0) {
+      return 0.0;
+    }
+    const BoutReal That = Te / 15.;
+    return 2e-32 / (pow(That, 1.5) + pow(That, -3));
+  }
+
+  static constexpr std::string_view type = "solps_default";
+};
+
 /// Below fits are from ADAS data by Mike Kryjak 03/06/2023 and supersede above deprecated fits
 /// Data generated using radas https://github.com/cfs-energy/radas
 /// Chose N = 1E20m-3 and tau = 0.5ms based on Moulton, 2021 (DOI: 10.1088/1741-4326/abe4b2)
@@ -440,6 +464,9 @@ private:
 namespace {
 RegisterComponent<FixedFractionRadiation<HutchinsonCarbon>>
     registercomponentfixedfractionhutchinsonbcarbon;
+
+RegisterComponent<FixedFractionRadiation<SolpsDefaultCooling>>
+    registercomponentfixedfractionsolpsdefault;
 
 RegisterComponent<FixedFractionRadiation<Carbon_adas>>
     registercomponentfixedfractioncarbon;
