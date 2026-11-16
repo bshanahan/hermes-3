@@ -149,6 +149,33 @@ Jacobian lagging
    Lower values lead to a higher cost per iteration, but a more accurate linear system, and the optimal
    value is problem dependent. Note that the Jacobian is always recalculated after a nonlinear solver failure.
 
+Jacobian re-use across timesteps
+   By default a new Jacobian is calculated at the start of every timestep, and ``lag_jacobian`` only applies within
+   a timestep. Setting ``jacobian_reuse = N`` keeps the Jacobian for up to ``N`` timesteps. When the timestep changes,
+   only the diagonal ``1/dt`` term of the Jacobian changes, and this is updated exactly, so a new timestep costs a
+   re-factorisation of the preconditioner but no finite difference evaluations. The Jacobian is still recalculated after
+   a solver failure, when the variables are rescaled, and when the number of linear iterations shows that it is no
+   longer a good preconditioner. It is intended for use with the matrix-free operator:
+
+   .. code-block:: ini
+
+      [solver]
+      matrix_free_operator = true
+      lag_jacobian = 50
+      jacobian_reuse = 10
+
+      [petsc]
+      snes_ksp_ew = true
+
+   The gain depends on the case. In a SPARC D-T single-null transport case (11 evolving fields, 52x32 cells, MUMPS LU
+   preconditioner, ``timestep_control = pid_nonlinear_its`` with ``target_its = 4``) the number of Jacobian calculations
+   fell by a factor of 5 to 8 and the run time by a factor of 1.4 to 2.1, both in the start-up phase and when restarting
+   from a steady state. In ``examples/tokamak-2D/recycling`` with the same controller settings the run was 15% shorter.
+   Without the matrix-free operator the result was mixed: 1.5 times faster in the SPARC case and 13% slower in the
+   example. With a controller that increases the timestep until the solver fails (such as a ``target_its`` above
+   ``max_nonlinear_iterations``), each failure discards the stored Jacobian, and the option gave little gain or a slower
+   run. Compare run times with and without it for a new type of case.
+
 Adaptive timestep control
    SNES currently uses a PID-based adaptive timestep control strategy implemented on the BOUT++ side.
    By default, it controls the timestep based on the number of nonlinear iterations required
