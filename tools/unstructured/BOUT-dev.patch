@@ -1,0 +1,179 @@
+diff --git a/src/solver/impls/snes/snes.cxx b/src/solver/impls/snes/snes.cxx
+index 07218447a..3dedc31a3 100644
+--- a/src/solver/impls/snes/snes.cxx
++++ b/src/solver/impls/snes/snes.cxx
+@@ -1277,6 +1277,34 @@ int SNESSolver::run() {
+ 
+           output.write("\n======== SNES failed =========\n");
+           output.write("\nReturn code: {}, reason: {}\n", ierr, static_cast<int>(reason));
++          {
++            // Largest entries of the residual, to locate the unknowns responsible.
++            // Unknowns are ordered by cell, then by evolving variable.
++            Vec fvec{nullptr};
++            if (SNESGetFunction(snes, &fvec, nullptr, nullptr) == PETSC_SUCCESS
++                and fvec != nullptr) {
++              const PetscScalar* fa = nullptr;
++              PetscInt nloc = 0;
++              VecGetLocalSize(fvec, &nloc);
++              VecGetArrayRead(fvec, &fa);
++              std::vector<PetscInt> order(nloc);
++              for (PetscInt i = 0; i < nloc; ++i) {
++                order[i] = i;
++              }
++              const PetscInt ntop = std::min<PetscInt>(8, nloc);
++              std::partial_sort(order.begin(), order.begin() + ntop, order.end(),
++                                [&](PetscInt a, PetscInt b) {
++                                  return std::abs(fa[a]) > std::abs(fa[b]);
++                                });
++              const int nvars = static_cast<int>(f2d.size() + f3d.size());
++              output.write("Largest residual entries (local index, point, variable, value):\n");
++              for (PetscInt k = 0; k < ntop; ++k) {
++                output.write("  {} {} {} {}\n", order[k], order[k] / nvars,
++                             order[k] % nvars, fa[order[k]]);
++              }
++              VecRestoreArrayRead(fvec, &fa);
++            }
++          }
+           for (const auto& f : f2d) {
+             output.write(
+                 "{} : ({} -> {}), ddt: ({} -> {})\n", f.name,
+diff --git a/src/solver/petsc_preconditioner.cxx b/src/solver/petsc_preconditioner.cxx
+index dbec994c1..098059b81 100644
+--- a/src/solver/petsc_preconditioner.cxx
++++ b/src/solver/petsc_preconditioner.cxx
+@@ -4,6 +4,7 @@
+ 
+ #include "bout/petsc_preconditioner.hxx"
+ 
++#include "bout/array.hxx"
+ #include "bout/assert.hxx"
+ #include "bout/boutcomm.hxx"
+ #include "bout/boutexception.hxx"
+@@ -142,6 +143,55 @@ PetscErrorCode PetscPreconditioner::createJacobianPattern(Field3D& index,
+                     .withDefault<int>((n_square == 0 && n_cross == 0) ? 2 : 0);
+ 
+   const auto xy_offsets = ColoringStencil::getOffsets(n_square, n_taxi, n_cross);
++
++  // Cells coupled to the cell at (x, y). A flat-cell (unstructured) mesh
++  // file gives the coupling explicitly, as CSR arrays over the whole list of
++  // cells along y (us_jac_rowptr, us_jac_cols); otherwise the stencil
++  // offsets are used.
++  Array<int> us_rowptr;
++  Array<int> us_cols;
++  const bool unstructured = mesh->sourceHasVar("us_jac_rowptr");
++  if (unstructured) {
++    if (mesh->get(us_rowptr, "us_jac_rowptr") != 0
++        or mesh->get(us_cols, "us_jac_cols") != 0) {
++      throw BoutException("Could not read us_jac_rowptr and us_jac_cols from the mesh");
++    }
++    if (mesh->LocalNx != 1 or mesh->LocalNz != 1 or mesh->getNXPE() != 1) {
++      throw BoutException("Unstructured Jacobian pattern needs nx = 1 and nz = 1");
++    }
++    output_progress.write("Using Jacobian pattern from the mesh file\n");
++  }
++  // In the unstructured case the second entry of each pair is the position
++  // in the whole list, which may be on another processor
++  const auto coupled = [&](int x, int y) {
++    std::vector<std::pair<int, int>> result;
++    if (unstructured) {
++      const int cell = mesh->getGlobalYIndexNoBoundaries(y);
++      result.reserve(us_rowptr[cell + 1] - us_rowptr[cell]);
++      for (int k = us_rowptr[cell]; k < us_rowptr[cell + 1]; ++k) {
++        result.emplace_back(x, us_cols[k]);
++      }
++    } else {
++      result.reserve(xy_offsets.size());
++      for (const auto& [x_off, y_off] : xy_offsets) {
++        result.emplace_back(x + x_off, y + y_off);
++      }
++    }
++    return result;
++  };
++  // Global index of the first unknown at a point returned by `coupled`,
++  // or -1 if there is none
++  const auto pointIndex = [&](int xi, int yi, int zi) -> int {
++    if (unstructured) {
++      // Every cell holds the same unknowns, numbered in order along y
++      return yi * (n2d + n3d);
++    }
++    if ((xi < 0) || (yi < 0) || (xi >= mesh->LocalNx) || (yi >= mesh->LocalNy)) {
++      return -1;
++    }
++    return ROUND(index(xi, yi, zi));
++  };
++
+   {
+     // Count the *unique* non-zeros for preallocation
+     std::vector<std::set<int>> d_nnz_map2d(nlocal);
+@@ -156,14 +206,9 @@ PetscErrorCode PetscPreconditioner::createJacobianPattern(Field3D& index,
+         // 2D fields
+         for (int i = 0; i < n2d; i++) {
+           const PetscInt row = ind0 + i;
+-          for (const auto& [x_off, y_off] : xy_offsets) {
+-            const int xi = x + x_off;
+-            const int yi = y + y_off;
+-            if ((xi < 0) || (yi < 0) || (xi >= mesh->LocalNx) || (yi >= mesh->LocalNy)) {
+-              continue;
+-            }
++          for (const auto& [xi, yi] : coupled(x, y)) {
+ 
+-            const int ind2 = ROUND(index(xi, yi, 0));
++            const int ind2 = pointIndex(xi, yi, 0);
+             if (ind2 < 0) {
+               continue; // A boundary point
+             }
+@@ -199,16 +244,9 @@ PetscErrorCode PetscPreconditioner::createJacobianPattern(Field3D& index,
+               }
+             }
+ 
+-            for (const auto& [x_off, y_off] : xy_offsets) {
+-              const int xi = x + x_off;
+-              const int yi = y + y_off;
+-
+-              if ((xi < 0) || (yi < 0) || (xi >= mesh->LocalNx)
+-                  || (yi >= mesh->LocalNy)) {
+-                continue;
+-              }
++            for (const auto& [xi, yi] : coupled(x, y)) {
+ 
+-              int ind2 = ROUND(index(xi, yi, 0));
++              int ind2 = pointIndex(xi, yi, 0);
+               if (ind2 < 0) {
+                 continue; // Boundary point
+               }
+@@ -259,14 +297,9 @@ PetscErrorCode PetscPreconditioner::createJacobianPattern(Field3D& index,
+       for (int i = 0; i < n2d; i++) {
+         const PetscInt row = ind0 + i;
+ 
+-        for (const auto& [x_off, y_off] : xy_offsets) {
+-          const int xi = x + x_off;
+-          const int yi = y + y_off;
+-          if ((xi < 0) || (yi < 0) || (xi >= mesh->LocalNx) || (yi >= mesh->LocalNy)) {
+-            continue;
+-          }
++        for (const auto& [xi, yi] : coupled(x, y)) {
+ 
+-          const int ind2 = ROUND(index(xi, yi, 0));
++          const int ind2 = pointIndex(xi, yi, 0);
+           if (ind2 < 0) {
+             continue; // A boundary point
+           }
+@@ -294,16 +327,10 @@ PetscErrorCode PetscPreconditioner::createJacobianPattern(Field3D& index,
+             PetscCall(MatSetValues(Jfd, 1, &row, 1, &col, &val, INSERT_VALUES));
+           }
+ 
+-          for (const auto& [x_off, y_off] : xy_offsets) {
+-            const int xi = x + x_off;
+-            const int yi = y + y_off;
+-
+-            if ((xi < 0) || (yi < 0) || (xi >= mesh->LocalNx) || (yi >= mesh->LocalNy)) {
+-              continue;
+-            }
++          for (const auto& [xi, yi] : coupled(x, y)) {
+ 
+             for (int zi = mesh->zstart; zi <= mesh->zend; ++zi) {
+-              int ind2 = ROUND(index(xi, yi, zi));
++              int ind2 = pointIndex(xi, yi, zi);
+               if (ind2 < 0) {
+                 continue; // Boundary point
+               }
