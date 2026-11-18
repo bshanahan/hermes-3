@@ -49,8 +49,22 @@ BoutReal limitFree(BoutReal fm, BoutReal fc) {
 } // namespace
 
 SheathBoundaryInsulating::SheathBoundaryInsulating(std::string name, Options& alloptions,
-                                                   Solver*) {
-  AUTO_TRACE();
+                                                   Solver*)
+    : NamedComponent(name, {
+                               readIfSet("species:{all_species}:charge"),
+                               readIfSet("species:e:{e_whole_domain}"),
+                               writeBoundaryFinal("species:e:{e_boundary}"),
+                               readWrite("species:e:energy_source"),
+                               writeBoundaryFinalIfSet("species:e:{e_optional}"),
+                               writeBoundaryReadInteriorIfSet("species:e:pressure"),
+                               readIfSet("species:{ions}:adiabatic"),
+                               readOnly("species:{ions}:AA"),
+                               readWrite("species:{ions}:energy_source"),
+                               writeBoundaryFinal("species:{ions}:{ion_boundary}"),
+                               writeBoundaryFinalIfSet("species:{ions}:{ion_optional}"),
+                               writeBoundaryReadInteriorIfSet("species:{ions}:pressure"),
+                               writeBoundaryFinalIfSet("fields:phi"),
+                           }) {
 
   Options& options = alloptions[name];
 
@@ -77,17 +91,23 @@ SheathBoundaryInsulating::SheathBoundaryInsulating(std::string name, Options& al
   gamma_e = options["gamma_e"]
                 .doc("Electron sheath heat transmission coefficient")
                 .withDefault(3.5);
+
+  substitutePermissions("e_whole_domain", {"AA", "adiabatic"});
+  substitutePermissions("e_boundary", {"density", "temperature"});
+  substitutePermissions("e_optional", {"velocity", "momentum"});
+  substitutePermissions("ion_boundary", {"density", "temperature"});
+  substitutePermissions("ion_optional", {"velocity", "momentum"});
 }
 
-void SheathBoundaryInsulating::transform(Options& state) {
-  AUTO_TRACE();
+void SheathBoundaryInsulating::transform_impl(GuardedOptions& state) {
 
-  Options& allspecies = state["species"];
-  Options& electrons = allspecies["e"];
+  GuardedOptions allspecies = state["species"];
+  GuardedOptions electrons = allspecies["e"];
 
   // Need electron properties
   // Not const because boundary conditions will be set
-  Field3D Ne = toFieldAligned(floor(GET_NOBOUNDARY(Field3D, electrons["density"]), 0.0));
+  Field3D Ne =
+      toFieldAligned(Field3D(floor(GET_NOBOUNDARY(Field3D, electrons["density"]), 0.0)));
   Field3D Te = toFieldAligned(GET_NOBOUNDARY(Field3D, electrons["temperature"]));
   Field3D Pe = IS_SET_NOBOUNDARY(electrons["pressure"])
                    ? toFieldAligned(getNoBoundary<Field3D>(electrons["pressure"]))
@@ -203,7 +223,7 @@ void SheathBoundaryInsulating::transform(Options& state) {
       continue; // Skip electrons
     }
 
-    Options& species = allspecies[kv.first]; // Note: Need non-const
+    GuardedOptions species = allspecies[kv.first]; // Note: Need non-const
 
     // Ion charge
     const BoutReal Zi =
@@ -221,7 +241,8 @@ void SheathBoundaryInsulating::transform(Options& state) {
                                    : 5. / 3; // Ratio of specific heats (ideal gas)
 
     // Density and temperature boundary conditions will be imposed (free)
-    Field3D Ni = toFieldAligned(floor(getNoBoundary<Field3D>(species["density"]), 0.0));
+    Field3D Ni =
+        toFieldAligned(Field3D(floor(getNoBoundary<Field3D>(species["density"]), 0.0)));
     Field3D Ti = toFieldAligned(getNoBoundary<Field3D>(species["temperature"]));
     Field3D Pi = species.isSet("pressure")
                      ? toFieldAligned(getNoBoundary<Field3D>(species["pressure"]))
@@ -312,11 +333,11 @@ void SheathBoundaryInsulating::transform(Options& state) {
           q = std::min(q, 0.0);
 
           // Multiply by cell area to get power
-          BoutReal flux = q * (coord->J[i] + coord->J[im])
-                          / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[im]));
+          BoutReal flux = q * (coord->J()[i] + coord->J()[im])
+                          / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[im]));
 
           // Divide by volume of cell to get energy loss rate (< 0)
-          BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+          BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
           ASSERT1(std::isfinite(power));
           ASSERT2(power <= 0.0);
 
@@ -391,11 +412,11 @@ void SheathBoundaryInsulating::transform(Options& state) {
           q = std::max(q, 0.0);
 
           // Multiply by cell area to get power
-          BoutReal flux = q * (coord->J[i] + coord->J[ip])
-                          / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[ip]));
+          BoutReal flux = q * (coord->J()[i] + coord->J()[ip])
+                          / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[ip]));
 
           // Divide by volume of cell to get energy loss rate (> 0)
-          BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+          BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
           ASSERT1(std::isfinite(power));
           ASSERT2(power >= 0.0);
 
@@ -437,7 +458,6 @@ void SheathBoundaryInsulating::transform(Options& state) {
     for (RangeIterator r = mesh->iterateBndryLowerY(); !r.isDone(); r++) {
       for (int jz = 0; jz < mesh->LocalNz; jz++) {
         auto i = indexAt(Ne, r.ind, mesh->ystart, jz);
-        auto ip = i.yp();
         auto im = i.ym();
 
         const BoutReal nesheath = 0.5 * (Ne[im] + Ne[i]);
@@ -453,11 +473,11 @@ void SheathBoundaryInsulating::transform(Options& state) {
                      * nesheath * vesheath;
 
         // Multiply by cell area to get power
-        BoutReal flux = q * (coord->J[i] + coord->J[im])
-                        / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[im]));
+        BoutReal flux = q * (coord->J()[i] + coord->J()[im])
+                        / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[im]));
 
         // Divide by volume of cell to get energy loss rate (< 0)
-        BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+        BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
 
 #if CHECKLEVEL >= 1
         if (!std::isfinite(power)) {
@@ -475,11 +495,10 @@ void SheathBoundaryInsulating::transform(Options& state) {
       for (int jz = 0; jz < mesh->LocalNz; jz++) {
         auto i = indexAt(Ne, r.ind, mesh->yend, jz);
         auto ip = i.yp();
-        auto im = i.ym();
 
         const BoutReal nesheath = 0.5 * (Ne[ip] + Ne[i]);
         const BoutReal tesheath = 0.5 * (Te[ip] + Te[i]); // electron temperature
-        const BoutReal vesheath = 0.5 * (Ve[im] + Ve[i]); // From ion flow
+        const BoutReal vesheath = 0.5 * (Ve[ip] + Ve[i]); // From ion flow
 
         // Take into account the flow of energy due to fluid flow
         // This is additional energy flux through the sheath
@@ -489,11 +508,11 @@ void SheathBoundaryInsulating::transform(Options& state) {
                      * nesheath * vesheath;
 
         // Multiply by cell area to get power
-        BoutReal flux = q * (coord->J[i] + coord->J[ip])
-                        / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[ip]));
+        BoutReal flux = q * (coord->J()[i] + coord->J()[ip])
+                        / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[ip]));
 
         // Divide by volume of cell to get energy loss rate (> 0)
-        BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+        BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
 #if CHECKLEVEL >= 1
         if (!std::isfinite(power)) {
           throw BoutException(

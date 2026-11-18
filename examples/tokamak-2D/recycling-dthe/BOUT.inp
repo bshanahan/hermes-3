@@ -17,20 +17,19 @@ type = shifted
 [solver]
 #type = beuler
 #pc_type = hypre
-type = pvode
+type = cvode
 mxstep=10000
 
 atol = 1e-7
 rtol = 1e-5
 
 #diagnose = true
-predictor = false
 
 [hermes]
 components = (d+, d, t+, t, he+, he, e,
-              sheath_boundary, collisions, thermal_force, recycling,
-              reactions, electron_force_balance,
-              ion_viscosity)
+              sheath_boundary, braginskii_collisions, braginskii_friction, braginskii_heat_exchange,
+              braginskii_thermal_force, reactions, electron_force_balance,
+              braginskii_ion_viscosity, braginskii_conduction, recycling)
 
 Nnorm = 2e18  # Reference density [m^-3]
 Bnorm = 1   # Reference magnetic field [T]
@@ -190,4 +189,3 @@ type = (
         he + e -> he+ + 2e, # Helium ionisation
         he+ + e -> he,      # Helium+ recombination
        )
-

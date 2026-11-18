@@ -1,32 +1,43 @@
 
 #include <bout/difops.hxx>
+#include <bout/field3d.hxx>
+#include <bout/mesh.hxx>
+#include <bout/options.hxx>
 
+#include "../include/hermes_utils.hxx"
 #include "../include/zero_current.hxx"
+#include <bout/constants.hxx>
 
 ZeroCurrent::ZeroCurrent(std::string name, Options& alloptions, Solver*)
-    : name(name) {
-  AUTO_TRACE();
-  Options &options = alloptions[name];
+    : NamedComponent(name,
+                     {readIfSet("species:{all_species}:charge"),
+                      readIfSet("species:{all_species}:{inputs}", Regions::Interior),
+                      readOnly(fmt::format("species:{}:AA", name)),
+                      readWrite(fmt::format("species:{}:velocity", name)),
+                      readWrite(fmt::format("species:{}:momentum", name))}),
+      name(name) {
+  Options& options = alloptions[name];
 
   charge = options["charge"].doc("Particle charge. electrons = -1");
 
   ASSERT0(charge != 0.0);
+
+  substitutePermissions("inputs", {"density", "velocity"});
 }
 
-void ZeroCurrent::transform(Options &state) {
-  AUTO_TRACE();
+void ZeroCurrent::transform_impl(GuardedOptions& state) {
 
   // Current due to other species
   Field3D current;
-  
+
   // Now calculate forces on other species
-  Options& allspecies = state["species"];
+  GuardedOptions allspecies = state["species"];
   for (auto& kv : allspecies.getChildren()) {
     if (kv.first == name) {
       continue; // Skip self
     }
-    Options& species = allspecies[kv.first]; // Note: Need non-const
- 
+    GuardedOptions species = allspecies[kv.first]; // Note: Need non-const
+
     if (!(species.isSet("density") and species.isSet("charge"))) {
       continue; // Needs both density and charge to contribute
     }
@@ -55,19 +66,31 @@ void ZeroCurrent::transform(Options &state) {
   }
 
   // Get the species density
-  Options& species = state["species"][name];
-  if (species["velocity"].isSet()) {
-    throw BoutException("Cannot use zero_current in species {} if velocity already set\n", name);
+  GuardedOptions species = state["species"][name];
+  if (species.isSet("velocity")) {
+    throw BoutException("Cannot use zero_current in species {} if velocity already set\n",
+                        name);
   }
   Field3D N = getNoBoundary<Field3D>(species["density"]);
 
-  velocity = current / (-charge * floor(N, 1e-5));
+  velocity = current / (-charge * softFloor(N, 1e-7));
+
+  momentum = GET_VALUE(BoutReal, species["AA"]) * N * velocity;
+
+  if (velocity.isFci()) {
+    velocity.getMesh()->communicate(velocity, momentum);
+    velocity.applyParallelBoundary("parallel_neumann_o2");
+    momentum.applyParallelBoundary("parallel_neumann_o2");
+  }
+
   set(species["velocity"], velocity);
+
+  set(species["momentum"], momentum);
 }
 
-void ZeroCurrent::outputVars(Options &state) {
-  AUTO_TRACE();
+void ZeroCurrent::outputVars(Options& state) {
   auto Cs0 = get<BoutReal>(state["Cs0"]);
+  auto Nnorm = get<BoutReal>(state["Nnorm"]);
 
   // Save the velocity
   set_with_attrs(state[std::string("V") + name], velocity,
@@ -76,6 +99,15 @@ void ZeroCurrent::outputVars(Options &state) {
                   {"conversion", Cs0},
                   {"long_name", name + " parallel velocity"},
                   {"standard_name", "velocity"},
+                  {"species", name},
+                  {"source", "zero_current"}});
+
+  set_with_attrs(state[std::string("NV") + name], momentum,
+                 {{"time_dimension", "t"},
+                  {"units", "kg / m^2 / s"},
+                  {"conversion", SI::Mp * Nnorm * Cs0},
+                  {"long_name", name + " parallel momentum"},
+                  {"standard_name", "momentum"},
                   {"species", name},
                   {"source", "zero_current"}});
 }

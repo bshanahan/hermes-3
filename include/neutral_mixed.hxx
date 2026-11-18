@@ -12,69 +12,105 @@
 
 /// Evolve density, parallel momentum and pressure
 /// for a neutral gas species with cross-field diffusion
-struct NeutralMixed : public Component {
+struct NeutralMixed : public NamedComponent<NeutralMixed> {
   ///
   /// @param name     The name of the species e.g. "h"
   /// @param options  Top-level options. Settings will be taken from options[name]
   /// @param solver   Time-integration solver to be used
-  NeutralMixed(const std::string& name, Options& options, Solver *solver);
-  
-  /// Modify the given simulation state
-  void transform(Options &state) override;
-  
+  NeutralMixed(const std::string& name, Options& options, Solver* solver);
+
   /// Use the final simulation state to update internal state
   /// (e.g. time derivatives)
-  void finally(const Options &state) override;
+  void finally(const Options& state) override;
 
   /// Add extra fields for output, or set attributes e.g docstrings
-  void outputVars(Options &state) override;
+  void outputVars(Options& state) override;
 
   /// Preconditioner
-  void precon(const Options &state, BoutReal gamma) override;
+  void precon(const Options& state, BoutReal gamma) override;
+
+  static constexpr auto type = "neutral_mixed";
+
 private:
-  std::string name;  ///< Species name
-  
-  Field3D Nn, Pn, NVn; // Density, pressure and parallel momentum
-  Field3D Vn; ///< Neutral parallel velocity
-  Field3D Tn; ///< Neutral temperature
+  std::string name; ///< Species name
+
+  Field3D Nn, Pn, NVn;            // Density, pressure and parallel momentum
+  Field3D Vn;                     ///< Neutral parallel velocity
+  Field3D Tn;                     ///< Neutral temperature
   Field3D Nnlim, Pnlim, logPnlim; // Limited in regions of low density
 
   BoutReal AA; ///< Atomic mass (proton = 1)
 
   std::vector<std::string> collision_names; ///< Collisions used for collisionality
-  std::string diffusion_collisions_mode;  ///< Collision selection, either afn or multispecies
-  Field3D nu; ///< Collisionality to use for diffusion
-  Field3D Dnn; ///< Diffusion coefficient
+  std::string
+      diffusion_collisions_mode; ///< Collision selection, either afn or multispecies
+  Field3D nu;                    ///< Collisionality to use for diffusion
+  Field3D Dnn;                   ///< Diffusion coefficient
+  Field3D Dnn_unlimited, Dmax;   ///< Unlimited and max Dnn
   Field3D DnnNn, DnnPn, DnnTn, DnnNVn; ///< Used for operators
-  BoutReal flux_limit; ///< Diffusive flux limit
-  BoutReal diffusion_limit;    ///< Maximum diffusion coefficient
+  bool combined_limiters;              ///< Derive kappa, eta limiters from Dnn
+  BoutReal flux_limit_adv;         ///< Advective flux limit, fraction of free streaming
+  BoutReal flux_limit_cond_perp;   ///< Perpendicular conductive flux limit
+  BoutReal flux_limit_cond_par;    ///< Parallel conductive flux limit
+  BoutReal flux_limit_visc_perp;   ///< Perpendicular viscous flux limit
+  BoutReal flux_limit_visc_par;    ///< Parallel viscous flux limit
+  BoutReal flux_limiter_sharpness; ///< Sharpness of the diffusive flux limiter
+  BoutReal limiter_gradient_floor; ///< Perpendicular floor, all limiter denominators
+  BoutReal limiter_gradient_floor_ratio; ///< Perpendicular floor / parallel floor
+  BoutReal limiter_gradient_floor_par;   ///< Parallel floor, derived from the two above
+  BoutReal limiter_gradient_ceiling;     ///< Ceiling for gradient in every denominator
+  BoutReal diffusion_limit;              ///< Explicit cap on Dnn [m^2/s]
+  BoutReal conduction_limit;             ///< Explicit cap on kappa_n [W m^-1 eV^-1]
+  BoutReal viscosity_limit;              ///< Explicit cap on eta_n [Pa s]
+  BoutReal neutral_lmax;                 ///< Used for collisionality floor
+
+  bool lag_limiter_gradient;   ///< Lag the limiter gradients?
+  BoutReal limiter_cache_time; ///< Solver time the lagged gradients were computed at
+  bool limiter_cache_valid;    ///< False until the first lagged gradients are computed
+  Field3D grad_reg_adv;        ///< Lagged gradient, Dmax denominator
+  Field3D grad_reg_cond_perp, grad_reg_cond_par; ///< Lagged gradients, conduction caps
+  Field3D grad_reg_visc_perp, grad_reg_visc_par; ///< Lagged gradients, viscosity caps
 
   bool sheath_ydown, sheath_yup;
+  bool zero_sheath_conductivity, zero_sheath_viscosity;
 
   BoutReal density_floor; ///< Minimum Nn used when dividing NVn by Nn to get Vn.
   BoutReal temperature_floor;
   BoutReal pressure_floor; ///< Minimum Pn used when dividing Pn by Nn to get Tn.
   bool freeze_low_density; ///< Freeze evolution in low density regions?
 
-  
+  BoutReal collisionality_override;     ///< Rnn input for testing
+  BoutReal density_norm, pressure_norm; ///< Normalisations
+  BoutReal momentum_norm;               ///< Normalisations
 
-  bool neutral_viscosity; ///< include viscosity?
+  bool neutral_viscosity;  ///< include viscosity?
   bool neutral_conduction; ///< Include heat conduction?
-  bool evolve_momentum; ///< Evolve parallel momentum?
-  
-  Field3D kappa_n, eta_n; ///< Neutral conduction and viscosity
+  bool evolve_momentum;    ///< Evolve parallel momentum?
+  bool normalise_sources;  ///< Normalise input sources?
 
-  bool precondition {true}; ///< Enable preconditioner?
-  bool precon_laplacexy {false}; ///< Use LaplaceXY?
-  bool lax_flux; ///< Use Lax flux for advection terms
+  /// Neutral conduction and viscosity. The unlimited coefficients are isotropic;
+  /// the limited ones are not, because the parallel and perpendicular limiters
+  /// use different gradients and may use different flux limit fractions.
+  Field3D kappa_n_unlimited, eta_n_unlimited;
+  Field3D kappa_n_perp, kappa_n_par;         ///< Limited neutral conduction
+  Field3D eta_n_perp, eta_n_par;             ///< Limited neutral viscosity
+  Field3D kappa_n_max_perp, kappa_n_max_par; ///< Free-streaming conduction caps
+  Field3D eta_n_max_perp, eta_n_max_par;     ///< Free-streaming viscosity caps
+
+  bool nonorthogonal_operators;   ///< Use nonorthogonal operators for radial transport?
+  bool precondition{true};        ///< Enable preconditioner?
+  bool precon_laplacexy{false};   ///< Use LaplaceXY?
+  bool lax_flux;                  ///< Use Lax flux for advection terms
   std::unique_ptr<Laplacian> inv; ///< Laplacian inversion used for preconditioning
 
-  Field3D density_source, pressure_source; ///< External input source
+  Field3D density_source, pressure_source, momentum_source; ///< External input source
   Field3D Sn, Sp, Snv; ///< Particle, pressure and momentum source
   Field3D sound_speed; ///< Sound speed for use with Lax flux
 
   bool output_ddt; ///< Save time derivatives?
-  bool diagnose; ///< Save additional diagnostics?
+  bool diagnose;   ///< Save additional diagnostics?
+
+  bout::ConductionMethod conduction_method{bout::ConductionMethod::Original};
 
   // Flow diagnostics
   Field3D pf_adv_perp_xlow, pf_adv_perp_ylow, pf_adv_par_ylow;
@@ -82,10 +118,21 @@ private:
   Field3D mf_visc_perp_xlow, mf_visc_perp_ylow, mf_visc_par_ylow;
   Field3D ef_adv_perp_xlow, ef_adv_perp_ylow, ef_adv_par_ylow;
   Field3D ef_cond_perp_xlow, ef_cond_perp_ylow, ef_cond_par_ylow;
+
+  /// Sets
+  /// - species
+  ///   - <name>
+  ///     - AA
+  ///     - density
+  ///     - momentum
+  ///     - pressure
+  ///     - temperature
+  ///     - velocity
+  void transform_impl(GuardedOptions& state) override;
 };
 
 namespace {
-RegisterComponent<NeutralMixed> registersolverneutralmixed("neutral_mixed");
+RegisterComponent<NeutralMixed> registersolverneutralmixed;
 }
 
 #endif // NEUTRAL_MIXED_H

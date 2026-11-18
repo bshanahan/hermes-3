@@ -1,22 +1,29 @@
 #include "../include/sheath_boundary.hxx"
-#include "../include/hermes_utils.hxx"
+#include "../include/component.hxx"
+#include "../include/guarded_options.hxx"
+#include "../include/permissions.hxx"
 
+#include <bout/assert.hxx>
+#include <bout/bout_types.hxx>
+#include <bout/boutexception.hxx>
 #include <bout/constants.hxx>
+#include <bout/coordinates.hxx>
+#include <bout/field.hxx>
+#include <bout/field3d.hxx>
 #include <bout/mesh.hxx>
 #include <bout/output_bout_types.hxx>
+#include <bout/region.hxx>
+#include <bout/sys/range.hxx>
+#include <bout/utils.hxx>
 
 #include <algorithm>
+#include <cmath>
+#include <string>
+#include <vector>
 
 using bout::globals::mesh;
 
 namespace {
-
-Ind3D indexAt(const Field3D& f, int x, int y, int z) {
-  int ny = f.getNy();
-  int nz = f.getNz();
-  return Ind3D{(x * ny + y) * nz + z, ny, nz};
-}
-
 /// Limited free gradient of log of a quantity
 /// This ensures that the guard cell values remain positive
 /// while also ensuring that the quantity never increases
@@ -43,12 +50,61 @@ BoutReal limitFree(BoutReal fm, BoutReal fc) {
   return fp;
 }
 
+/// Smooth maximum of the sound speed C_i and the end-cell speed u towards the wall,
+/// (C_i + u + sqrt((C_i - u)^2 + w^2)) / 2 with w = smoothing C_i; never below max(C_i, u)
+BoutReal bohmSpeed(BoutReal C_i, BoutReal u, BoutReal smoothing) {
+  const BoutReal w = smoothing * C_i;
+  return 0.5 * (C_i + u + std::sqrt(SQ(C_i - u) + SQ(w)));
+}
+
 } // namespace
 
-SheathBoundary::SheathBoundary(std::string name, Options& alloptions, Solver*) {
-  AUTO_TRACE();
+BoutReal SheathBoundary::lowerSheathVelocity(BoutReal C_i, BoutReal V) const {
+  if (bohm_smoothing > 0.0) {
+    return -bohmSpeed(C_i, -V, bohm_smoothing);
+  }
+  return std::min(-C_i, V);
+}
+
+BoutReal SheathBoundary::upperSheathVelocity(BoutReal C_i, BoutReal V) const {
+  if (bohm_smoothing > 0.0) {
+    return bohmSpeed(C_i, V, bohm_smoothing);
+  }
+  return std::max(C_i, V);
+}
+
+BoutReal SheathBoundary::ionSecondaryElectronEmissionGamma(BoutReal ion_energy) const {
+  if (ion_ee_gamma_max < 0.0) {
+    return 0.0;
+  }
+  if (ion_energy <= 0.0) {
+    return 0.0;
+  }
+
+  return 0.5 * (1. + tanh((ion_energy - ion_ee_E_th) / (0.3 * ion_ee_E_th)))
+         * ion_ee_gamma_max * std::pow(ion_energy / ion_ee_E_max, ion_ee_p)
+         * std::exp(ion_ee_p * (1. - (ion_energy / ion_ee_E_max)));
+}
+
+SheathBoundary::SheathBoundary(std::string name, Options& alloptions, Solver*)
+    : NamedComponent(name, {
+                               readIfSet("species:{all_species}:charge"),
+                               readIfSet("species:e:{e_whole_domain}"),
+                               writeBoundaryFinal("species:e:{e_boundary}"),
+                               readWrite("species:e:energy_source"),
+                               writeBoundaryFinalIfSet("species:e:{e_optional}"),
+                               writeBoundaryReadInteriorIfSet("species:e:pressure"),
+                               readIfSet("species:{ions}:adiabatic"),
+                               readOnly("species:{ions}:AA"),
+                               readWrite("species:{ions}:energy_source"),
+                               writeBoundaryFinal("species:{ions}:{ion_boundary}"),
+                               writeBoundaryReadInteriorIfSet("species:{ions}:pressure"),
+                               writeBoundaryFinalIfSet("species:{ions}:{ion_optional}"),
+                           }) {
 
   Options& options = alloptions[name];
+  const Options& units = alloptions["units"];
+  const BoutReal Tnorm = units["eV"];
 
   Ge = options["secondary_electron_coef"]
            .doc("Effective secondary electron emission coefficient")
@@ -58,10 +114,29 @@ SheathBoundary::SheathBoundary(std::string name, Options& alloptions, Solver*) {
     throw BoutException("Secondary electron emission must be between 0 and 1 ({:e})", Ge);
   }
 
+  ion_ee_gamma_max = options["ion_ee_gamma_max"]
+                         .doc("Maximum ion induced secondary electron emission "
+                              "coefficient. < 0 means off")
+                         .withDefault(-1.0);
+  ion_ee_E_th =
+      options["ion_ee_E_th"]
+          .doc("Energy threshold [eV] for ion induced secondary electron emission")
+          .withDefault(50.0)
+      / Tnorm;
+  ion_ee_E_max =
+      options["ion_ee_E_max"]
+          .doc("Energy of maximum ion induced secondary electron emission [eV]")
+          .withDefault(5e3)
+      / Tnorm;
+
+  ion_ee_p = options["ion_ee_p"]
+                 .doc("Shape factor for ion induced secondary electron emission")
+                 .withDefault(1.0);
+
   sin_alpha = options["sin_alpha"]
                   .doc("Sin of the angle between magnetic field line and wall surface. "
                        "Should be between 0 and 1")
-    .withDefault(Field3D(1.0));
+                  .withDefault(Field3D(1.0));
 
   if ((min(sin_alpha) < 0.0) or (max(sin_alpha) > 1.0)) {
     throw BoutException("Range of sin_alpha must be between 0 and 1");
@@ -75,8 +150,13 @@ SheathBoundary::SheathBoundary(std::string name, Options& alloptions, Solver*) {
           .doc("Always set phi field? Default is to only modify if already set")
           .withDefault<bool>(false);
 
-  const Options& units = alloptions["units"];
-  const BoutReal Tnorm = units["eV"];
+  bohm_smoothing = options["bohm_smoothing"]
+                       .doc("Smooth the Bohm condition |V_i| >= C_i over a width "
+                            "bohm_smoothing * C_i (0 = sharp)")
+                       .withDefault(0.0);
+  if (bohm_smoothing < 0.0) {
+    throw BoutException("sheath_boundary:bohm_smoothing must not be negative");
+  }
 
   // Read wall voltage, convert to normalised units
   wall_potential = options["wall_potential"]
@@ -94,17 +174,25 @@ SheathBoundary::SheathBoundary(std::string name, Options& alloptions, Solver*) {
   floor_potential = options["floor_potential"]
                         .doc("Apply a floor to wall potential when calculating Ve?")
                         .withDefault<bool>(true);
+
+  substitutePermissions("e_whole_domain", {"AA", "adiabatic"});
+  substitutePermissions("e_boundary", {"density", "temperature"});
+  substitutePermissions("e_optional", {"velocity", "momentum"});
+  substitutePermissions("ion_boundary", {"density", "temperature"});
+  substitutePermissions("ion_optional", {"velocity", "momentum"});
+  setPermissions(always_set_phi ? writeBoundaryReadInteriorIfSet("fields:phi")
+                                : writeBoundaryIfSet("fields:phi"));
 }
 
-void SheathBoundary::transform(Options& state) {
-  AUTO_TRACE();
+void SheathBoundary::transform_impl(GuardedOptions& state) {
 
-  Options& allspecies = state["species"];
-  Options& electrons = allspecies["e"];
+  GuardedOptions allspecies = state["species"];
+  GuardedOptions electrons = allspecies["e"];
 
   // Need electron properties
   // Not const because boundary conditions will be set
-  Field3D Ne = toFieldAligned(floor(GET_NOBOUNDARY(Field3D, electrons["density"]), 0.0));
+  Field3D Ne =
+      toFieldAligned(Field3D(floor(GET_NOBOUNDARY(Field3D, electrons["density"]), 0.0)));
   Field3D Te = toFieldAligned(GET_NOBOUNDARY(Field3D, electrons["temperature"]));
   Field3D Pe = IS_SET_NOBOUNDARY(electrons["pressure"])
                    ? toFieldAligned(getNoBoundary<Field3D>(electrons["pressure"]))
@@ -140,7 +228,19 @@ void SheathBoundary::transform(Options& state) {
     // Calculate potential phi assuming zero current
     // Note: This is equation (22) in Tskhakaya 2005, with I = 0
 
-    // Need to sum  s_i Z_i C_i over all ion species
+    struct IonBoundaryInfo {
+      Field3D density;
+      Field3D temperature;
+      Field3D velocity;
+      BoutReal mass;
+      BoutReal charge;
+      BoutReal adiabatic;
+    };
+
+    std::vector<IonBoundaryInfo> ion_species;
+
+    // Sum the positive outgoing ion charge flux divided by electron density:
+    // s_i * Z_i * sin(alpha) * |V_i,sheath|
     //
     // To avoid looking up species for every grid point, this
     // loops over the boundaries once per species.
@@ -149,22 +249,29 @@ void SheathBoundary::transform(Options& state) {
 
     // Iterate through charged ion species
     for (auto& kv : allspecies.getChildren()) {
-      Options& species = allspecies[kv.first];
+      GuardedOptions species = allspecies[kv.first];
 
       if ((kv.first == "e") or !IS_SET(species["charge"])
           or (get<BoutReal>(species["charge"]) == 0.0)) {
         continue; // Skip electrons and non-charged ions
       }
 
-      const Field3D Ni =
-          toFieldAligned(floor(GET_NOBOUNDARY(Field3D, species["density"]), 0.0));
+      const Field3D Ni = toFieldAligned(
+          Field3D(floor(GET_NOBOUNDARY(Field3D, species["density"]), 0.0)));
       const Field3D Ti = toFieldAligned(GET_NOBOUNDARY(Field3D, species["temperature"]));
+      const Field3D Vi = species.isSet("velocity")
+                             ? toFieldAligned(getNoBoundary<Field3D>(species["velocity"]))
+                             : zeroFrom(Ni);
       const BoutReal Mi = GET_NOBOUNDARY(BoutReal, species["AA"]);
       const BoutReal Zi = GET_NOBOUNDARY(BoutReal, species["charge"]);
 
       const BoutReal adiabatic = IS_SET(species["adiabatic"])
                                      ? get<BoutReal>(species["adiabatic"])
                                      : 5. / 3; // Ratio of specific heats (ideal gas)
+
+      if (ion_ee_gamma_max > 0.0) {
+        ion_species.push_back({Ni, Ti, Vi, Mi, Zi, adiabatic});
+      }
 
       if (lower_y) {
         // Sum values, put result in mesh->ystart
@@ -182,8 +289,8 @@ void SheathBoundary::transform(Options& state) {
             if (!std::isfinite(s_i)) {
               s_i = 1.0;
             }
-            BoutReal te = Te[i];
-            BoutReal ti = Ti[i];
+            const BoutReal te = Te[i];
+            const BoutReal ti = Ti[i];
 
             // Equation (9) in Tskhakaya 2005
 
@@ -198,11 +305,15 @@ void SheathBoundary::transform(Options& state) {
             }
 
             // Limit for e.g. Ni zero gradient
-            BoutReal C_i_sq = std::clamp(
+            const BoutReal C_i_sq = std::clamp(
                 (adiabatic * ti + Zi * s_i * te * grad_ne / grad_ni) / Mi, 0., 100.);
 
-            // Note: Vzi = C_i * sin(α)
-            ion_sum[i] += s_i * Zi * sin_alpha[ip] * sqrt(C_i_sq);
+            // Enable supersonic flow
+            const BoutReal visheath =
+                lowerSheathVelocity(sqrt(C_i_sq), Vi[i]); // Negative into lower sheath
+
+            // Note: Vzi = |visheath| * sin(α)
+            ion_sum[i] += s_i * Zi * sin_alpha[ip] * (-visheath);
           }
         }
       }
@@ -222,8 +333,8 @@ void SheathBoundary::transform(Options& state) {
               s_i = 1.0;
             }
 
-            BoutReal te = Te[i];
-            BoutReal ti = Ti[i];
+            const BoutReal te = Te[i];
+            const BoutReal ti = Ti[i];
 
             // Equation (9) in Tskhakaya 2005
 
@@ -235,10 +346,14 @@ void SheathBoundary::transform(Options& state) {
             }
 
             // Limit for e.g. Ni zero gradient
-            BoutReal C_i_sq = std::clamp(
+            const BoutReal C_i_sq = std::clamp(
                 (adiabatic * ti + Zi * s_i * te * grad_ne / grad_ni) / Mi, 0., 100.);
 
-            ion_sum[i] += s_i * Zi * sin_alpha[im] * sqrt(C_i_sq);
+            // Enable supersonic flow
+            const BoutReal visheath =
+                upperSheathVelocity(sqrt(C_i_sq), Vi[i]); // Positive into upper sheath
+
+            ion_sum[i] += s_i * Zi * sin_alpha[im] * visheath;
           }
         }
       }
@@ -246,17 +361,94 @@ void SheathBoundary::transform(Options& state) {
 
     phi.allocate();
 
-    // ion_sum now contains  sum  s_i Z_i C_i over all ion species
+    // ion_sum now contains  sum  s_i Z_i |V_i,sheath| over all ion species
     // at mesh->ystart and mesh->yend indices
     if (lower_y) {
       for (RangeIterator r = mesh->iterateBndryLowerY(); !r.isDone(); r++) {
         for (int jz = 0; jz < mesh->LocalNz; jz++) {
           auto i = indexAt(phi, r.ind, mesh->ystart, jz);
+          auto ip = i.yp();
 
           if (Te[i] <= 0.0) {
             phi[i] = 0.0;
           } else {
-            phi[i] = Te[i] * log(sqrt(Te[i] / (Me * TWOPI)) * (1. - Ge) / ion_sum[i]);
+            const BoutReal v_te = sqrt(Te[i] / (Me * TWOPI));
+            const BoutReal prefactor = v_te * (1. - Ge);
+
+            // Solve for sheath drop Δφ = φ - φ_wall, with optional ion-induced SEE:
+            //   (1-Ge) v_te exp(-Δφ/Te) = ion_sum + Σ_i [γ_i(E_i(Δφ)) Γ_i/n_e]
+            BoutReal delta_phi = Te[i] * log(prefactor / ion_sum[i]);
+
+            if (ion_ee_gamma_max > 0.0) {
+              BoutReal delta_phi_guess = delta_phi;
+              constexpr int max_iter = 20;
+              constexpr BoutReal relax = 0.5;
+
+              for (int iter = 0; iter < max_iter; ++iter) {
+                BoutReal ion_emission_sum = 0.0;
+
+                for (const auto& ion : ion_species) {
+                  const BoutReal te = Te[i];
+                  const BoutReal ti = ion.temperature[i];
+                  const BoutReal mi = ion.mass;
+                  const BoutReal zi = ion.charge;
+                  const BoutReal ad = ion.adiabatic;
+
+                  BoutReal s_i = std::clamp(
+                      0.5 * (3. * ion.density[i] / Ne[i] - ion.density[ip] / Ne[ip]), 0.0,
+                      1.0);
+                  if (!std::isfinite(s_i)) {
+                    s_i = 1.0;
+                  }
+
+                  BoutReal grad_ne = Ne[ip] - Ne[i];
+                  BoutReal grad_ni = ion.density[ip] - ion.density[i];
+
+                  // Keep consistent with the ion_sum construction above
+                  if (fabs(grad_ni) < 2e-3) {
+                    grad_ni = grad_ne = 2e-3;
+                  }
+
+                  const BoutReal C_i_sq = std::clamp(
+                      (ad * ti + zi * s_i * te * grad_ne / grad_ni) / mi, 0., 100.);
+
+                  // Negative velocity is outward through the lower-Y sheath
+                  const BoutReal visheath =
+                      lowerSheathVelocity(sqrt(C_i_sq), ion.velocity[i]);
+
+                  // Positive magnitude of the outgoing ion particle flux divided by ne
+                  const BoutReal ion_flux_over_ne = -s_i * sin_alpha[ip] * visheath;
+
+                  const BoutReal ion_energy =
+                      0.5 * (ti + mi * SQ(visheath)) + zi * delta_phi_guess;
+
+                  ion_emission_sum +=
+                      ionSecondaryElectronEmissionGamma(ion_energy) * ion_flux_over_ne;
+                }
+
+                const BoutReal denom = ion_sum[i] + ion_emission_sum;
+                if (!(denom > 0.0) || !std::isfinite(denom)) {
+                  break;
+                }
+
+                const BoutReal delta_phi_new = Te[i] * log(prefactor / denom);
+                if (!std::isfinite(delta_phi_new)) {
+                  break;
+                }
+
+                const BoutReal err = fabs(delta_phi_new - delta_phi_guess);
+                const BoutReal scale = 1.0 + fabs(delta_phi_guess);
+                delta_phi_guess = (1. - relax) * delta_phi_guess + relax * delta_phi_new;
+
+                if (err < 1e-10 * scale) {
+                  break;
+                }
+              }
+
+              delta_phi = delta_phi_guess;
+            }
+
+            phi[i] = delta_phi;
           }
 
           const BoutReal phi_wall = wall_potential[i];
@@ -271,11 +463,85 @@ void SheathBoundary::transform(Options& state) {
       for (RangeIterator r = mesh->iterateBndryUpperY(); !r.isDone(); r++) {
         for (int jz = 0; jz < mesh->LocalNz; jz++) {
           auto i = indexAt(phi, r.ind, mesh->yend, jz);
+          auto im = i.ym();
 
           if (Te[i] <= 0.0) {
             phi[i] = 0.0;
           } else {
-            phi[i] = Te[i] * log(sqrt(Te[i] / (Me * TWOPI)) * (1. - Ge) / ion_sum[i]);
+            const BoutReal v_te = sqrt(Te[i] / (Me * TWOPI));
+            const BoutReal prefactor = v_te * (1. - Ge);
+
+            BoutReal delta_phi = Te[i] * log(prefactor / ion_sum[i]);
+
+            if (ion_ee_gamma_max > 0.0) {
+              BoutReal delta_phi_guess = delta_phi;
+              constexpr int max_iter = 20;
+              constexpr BoutReal relax = 0.5;
+
+              for (int iter = 0; iter < max_iter; ++iter) {
+                BoutReal ion_emission_sum = 0.0;
+
+                for (const auto& ion : ion_species) {
+                  const BoutReal te = Te[i];
+                  const BoutReal ti = ion.temperature[i];
+                  const BoutReal mi = ion.mass;
+                  const BoutReal zi = ion.charge;
+                  const BoutReal ad = ion.adiabatic;
+
+                  BoutReal s_i = std::clamp(
+                      0.5 * (3. * ion.density[i] / Ne[i] - ion.density[im] / Ne[im]), 0.0,
+                      1.0);
+                  if (!std::isfinite(s_i)) {
+                    s_i = 1.0;
+                  }
+
+                  BoutReal grad_ne = Ne[i] - Ne[im];
+                  BoutReal grad_ni = ion.density[i] - ion.density[im];
+
+                  if (fabs(grad_ni) < 2e-3) {
+                    grad_ni = grad_ne = 2e-3;
+                  }
+
+                  const BoutReal C_i_sq = std::clamp(
+                      (ad * ti + zi * s_i * te * grad_ne / grad_ni) / mi, 0., 100.);
+
+                  // Positive velocity is outward through the upper-Y sheath
+                  const BoutReal visheath =
+                      upperSheathVelocity(sqrt(C_i_sq), ion.velocity[i]);
+
+                  // Positive magnitude of the outgoing ion particle flux divided by ne
+                  const BoutReal ion_flux_over_ne = s_i * sin_alpha[im] * visheath;
+
+                  const BoutReal ion_energy =
+                      0.5 * (ti + mi * SQ(visheath)) + zi * delta_phi_guess;
+
+                  ion_emission_sum +=
+                      ionSecondaryElectronEmissionGamma(ion_energy) * ion_flux_over_ne;
+                }
+
+                const BoutReal denom = ion_sum[i] + ion_emission_sum;
+                if (!(denom > 0.0) || !std::isfinite(denom)) {
+                  break;
+                }
+
+                const BoutReal delta_phi_new = Te[i] * log(prefactor / denom);
+                if (!std::isfinite(delta_phi_new)) {
+                  break;
+                }
+
+                const BoutReal err = fabs(delta_phi_new - delta_phi_guess);
+                const BoutReal scale = 1.0 + fabs(delta_phi_guess);
+                delta_phi_guess = (1. - relax) * delta_phi_guess + relax * delta_phi_new;
+
+                if (err < 1e-10 * scale) {
+                  break;
+                }
+              }
+
+              delta_phi = delta_phi_guess;
+            }
+
+            phi[i] = delta_phi;
           }
 
           const BoutReal phi_wall = wall_potential[i];
@@ -324,8 +590,8 @@ void SheathBoundary::transform(Options& state) {
                             : 0.5 * (phi[im] + phi[i]);
 
         // Electron sheath heat transmission
-        const BoutReal gamma_e =
-            floor(2 / (1. - Ge) + (phisheath - phi_wall) / floor(tesheath, 1e-5), 0.0);
+        const BoutReal gamma_e = floor(
+            (2 / (1. - Ge)) + ((phisheath - phi_wall) / floor(tesheath, 1e-5)), 0.0);
 
         // Electron velocity into sheath (< 0)
         const BoutReal vesheath = (tesheath < 1e-10)
@@ -345,11 +611,11 @@ void SheathBoundary::transform(Options& state) {
         q = std::min(q, 0.0);
 
         // Multiply by cell area to get power
-        BoutReal flux = q * (coord->J[i] + coord->J[im])
-                        / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[im]));
+        const BoutReal flux = q * (coord->J()[i] + coord->J()[im])
+                              / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[im]));
 
         // Divide by volume of cell to get energy loss rate (< 0)
-        BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+        const BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
 
 #if CHECKLEVEL >= 1
         if (!std::isfinite(power)) {
@@ -392,8 +658,8 @@ void SheathBoundary::transform(Options& state) {
                             : 0.5 * (phi[ip] + phi[i]);
 
         // Electron sheath heat transmission
-        const BoutReal gamma_e =
-            floor(2 / (1. - Ge) + (phisheath - phi_wall) / floor(tesheath, 1e-5), 0.0);
+        const BoutReal gamma_e = floor(
+            (2 / (1. - Ge)) + ((phisheath - phi_wall) / floor(tesheath, 1e-5)), 0.0);
 
         // Electron velocity into sheath (> 0)
         const BoutReal vesheath = (tesheath < 1e-10)
@@ -412,11 +678,11 @@ void SheathBoundary::transform(Options& state) {
                      * nesheath * vesheath;
         q = std::max(q, 0.0);
         // Multiply by cell area to get power
-        BoutReal flux = q * (coord->J[i] + coord->J[ip])
-                        / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[ip]));
+        BoutReal flux = q * (coord->J()[i] + coord->J()[ip])
+                        / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[ip]));
 
         // Divide by volume of cell to get energy loss rate (> 0)
-        BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+        BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
 #if CHECKLEVEL >= 1
         if (!std::isfinite(power)) {
           throw BoutException(
@@ -438,25 +704,6 @@ void SheathBoundary::transform(Options& state) {
   setBoundary(electrons["temperature"], fromFieldAligned(Te));
   setBoundary(electrons["pressure"], fromFieldAligned(Pe));
 
-  // Add energy source (negative in cell next to sheath)
-  // Note: already includes previously set sources
-  set(electrons["energy_source"], fromFieldAligned(electron_energy_source));
-
-  if (IS_SET_NOBOUNDARY(electrons["velocity"])) {
-    Ve.clearParallelSlices();
-    setBoundary(electrons["velocity"], fromFieldAligned(Ve));
-  }
-  if (IS_SET_NOBOUNDARY(electrons["momentum"])) {
-    NVe.clearParallelSlices();
-    setBoundary(electrons["momentum"], fromFieldAligned(NVe));
-  }
-
-  if (always_set_phi or IS_SET_NOBOUNDARY(state["fields"]["phi"])) {
-    // Set the potential, including boundary conditions
-    phi.clearParallelSlices();
-    setBoundary(state["fields"]["phi"], fromFieldAligned(phi));
-  }
-
   //////////////////////////////////////////////////////////////////
   // Iterate through all ions
   for (auto& kv : allspecies.getChildren()) {
@@ -464,7 +711,7 @@ void SheathBoundary::transform(Options& state) {
       continue; // Skip electrons
     }
 
-    Options& species = allspecies[kv.first]; // Note: Need non-const
+    GuardedOptions species = allspecies[kv.first]; // Note: Need non-const
 
     // Ion charge
     const BoutReal Zi =
@@ -482,7 +729,8 @@ void SheathBoundary::transform(Options& state) {
                                    : 5. / 3; // Ratio of specific heats (ideal gas)
 
     // Density and temperature boundary conditions will be imposed (free)
-    Field3D Ni = toFieldAligned(floor(getNoBoundary<Field3D>(species["density"]), 0.0));
+    Field3D Ni =
+        toFieldAligned(Field3D(floor(getNoBoundary<Field3D>(species["density"]), 0.0)));
     Field3D Ti = toFieldAligned(getNoBoundary<Field3D>(species["temperature"]));
     Field3D Pi = species.isSet("pressure")
                      ? toFieldAligned(getNoBoundary<Field3D>(species["pressure"]))
@@ -535,7 +783,7 @@ void SheathBoundary::transform(Options& state) {
           // (from comparing C_i^2 in eq. 9 with eq. 20
           //
           // Concentration
-          BoutReal s_i = std::clamp(nisheath / floor(nesheath, 1e-10), 0., 1.);
+          const BoutReal s_i = std::clamp(nisheath / floor(nesheath, 1e-10), 0., 1.);
           BoutReal grad_ne = Ne[i] - nesheath;
           BoutReal grad_ni = Ni[i] - nisheath;
 
@@ -547,14 +795,15 @@ void SheathBoundary::transform(Options& state) {
           // Equation (9) in Tskhakaya 2005
           //
           // Limit for e.g. Ni zero gradient
-          BoutReal C_i_sq = std::clamp(
+          const BoutReal C_i_sq = std::clamp(
               (adiabatic * tisheath + Zi * s_i * tesheath * grad_ne / grad_ni) / Mi, 0.,
               100.);
 
           // Ion sheath heat transmission coefficient
-          const BoutReal gamma_i = 2.5 + 0.5 * Mi * C_i_sq / tisheath;
+          const BoutReal gamma_i = 2.5 + (0.5 * Mi * C_i_sq / tisheath);
 
-          const BoutReal visheath = -sqrt(C_i_sq); // Negative -> into sheath
+          // Negative -> into sheath; allow supersonic flow
+          const BoutReal visheath = lowerSheathVelocity(sqrt(C_i_sq), Vi[i]);
 
           // Set boundary conditions on flows
           Vi[im] = 2. * visheath - Vi[i];
@@ -569,15 +818,39 @@ void SheathBoundary::transform(Options& state) {
           q = std::min(q, 0.0);
 
           // Multiply by cell area to get power
-          BoutReal flux = q * (coord->J[i] + coord->J[im])
-                          / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[im]));
+          const BoutReal flux = q * (coord->J()[i] + coord->J()[im])
+                                / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[im]));
 
           // Divide by volume of cell to get energy loss rate (< 0)
-          BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+          const BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
           ASSERT1(std::isfinite(power));
           ASSERT2(power <= 0.0);
 
           energy_source[i] += power;
+
+          if (ion_ee_gamma_max > 0.0) {
+            // Ion-induced secondary electron emission
+
+            const BoutReal phi_wall = wall_potential[i];
+            const BoutReal phisheath = floor_potential
+                                           ? floor(0.5 * (phi[im] + phi[i]), phi_wall)
+                                           : 0.5 * (phi[im] + phi[i]);
+
+            // Ion energy at the wall
+            const BoutReal Ei =
+                (0.5 * (tisheath + (Mi * SQ(visheath)))) + (Zi * (phisheath - phi_wall));
+
+            const BoutReal ion_ee_gamma = ionSecondaryElectronEmissionGamma(Ei);
+
+            // Add flow of cold electrons into plasma
+            BoutReal vesheath = 0.5 * (Ve[im] + Ve[i]);
+            const BoutReal nvesheath =
+                (nesheath * vesheath) - (ion_ee_gamma * nisheath * visheath);
+            vesheath = nvesheath / nesheath;
+
+            Ve[im] = 2 * vesheath - Ve[i];
+            NVe[im] = 2. * Me * nvesheath - NVe[i];
+          }
         }
       }
     }
@@ -611,7 +884,7 @@ void SheathBoundary::transform(Options& state) {
           //
           // 1 / (1 + ∂_{ln n_e} ln s_i = s_i * ∂n_e / (s_i * ∂n_e + ∂ n_i)
           // Concentration
-          BoutReal s_i = std::clamp(nisheath / floor(nesheath, 1e-10), 0., 1.);
+          const BoutReal s_i = std::clamp(nisheath / floor(nesheath, 1e-10), 0., 1.);
           BoutReal grad_ne = Ne[i] - nesheath;
           BoutReal grad_ni = Ni[i] - nisheath;
 
@@ -623,13 +896,14 @@ void SheathBoundary::transform(Options& state) {
           // Equation (9) in Tskhakaya 2005
           //
           // Limit for e.g. Ni zero gradient
-          BoutReal C_i_sq = std::clamp(
+          const BoutReal C_i_sq = std::clamp(
               (adiabatic * tisheath + Zi * s_i * tesheath * grad_ne / grad_ni) / Mi, 0.,
               100.);
 
-          const BoutReal gamma_i = 2.5 + 0.5 * Mi * C_i_sq / tisheath; // + Δγ
+          const BoutReal gamma_i = 2.5 + (0.5 * Mi * C_i_sq / tisheath); // + Δγ
 
-          const BoutReal visheath = sqrt(C_i_sq); // Positive -> into sheath
+          // Positive -> into sheath; allow supersonic flow
+          const BoutReal visheath = upperSheathVelocity(sqrt(C_i_sq), Vi[i]);
 
           // Set boundary conditions on flows
           Vi[ip] = 2. * visheath - Vi[i];
@@ -645,15 +919,39 @@ void SheathBoundary::transform(Options& state) {
           q = std::max(q, 0.0);
 
           // Multiply by cell area to get power
-          BoutReal flux = q * (coord->J[i] + coord->J[ip])
-                          / (sqrt(coord->g_22[i]) + sqrt(coord->g_22[ip]));
+          const BoutReal flux = q * (coord->J()[i] + coord->J()[ip])
+                                / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[ip]));
 
           // Divide by volume of cell to get energy loss rate (> 0)
-          BoutReal power = flux / (coord->dy[i] * coord->J[i]);
+          const BoutReal power = flux / (coord->dy()[i] * coord->J()[i]);
           ASSERT1(std::isfinite(power));
           ASSERT2(power >= 0.0);
 
           energy_source[i] -= power; // Note: Sign negative because power > 0
+
+          if (ion_ee_gamma_max > 0.0) {
+            // Ion-induced secondary electron emission
+
+            const BoutReal phi_wall = wall_potential[i];
+            const BoutReal phisheath = floor_potential
+                                           ? floor(0.5 * (phi[ip] + phi[i]), phi_wall)
+                                           : 0.5 * (phi[ip] + phi[i]);
+
+            // Ion energy at the wall
+            const BoutReal Ei =
+                (0.5 * (tisheath + Mi * SQ(visheath))) + (Zi * (phisheath - phi_wall));
+
+            const BoutReal ion_ee_gamma = ionSecondaryElectronEmissionGamma(Ei);
+
+            // Add flow of cold electrons into plasma
+            BoutReal vesheath = 0.5 * (Ve[ip] + Ve[i]);
+            const BoutReal nvesheath =
+                (nesheath * vesheath) - (ion_ee_gamma * nisheath * visheath);
+            vesheath = nvesheath / nesheath;
+
+            Ve[ip] = 2 * vesheath - Ve[i];
+            NVe[ip] = 2. * Me * nvesheath - NVe[i];
+          }
         }
       }
     }
@@ -680,5 +978,23 @@ void SheathBoundary::transform(Options& state) {
     // Additional loss of energy through sheath
     // Note: Already includes previously set sources
     set(species["energy_source"], fromFieldAligned(energy_source));
+  }
+
+  // Add energy source (negative in cell next to sheath)
+  // Note: already includes previously set sources
+  set(electrons["energy_source"], fromFieldAligned(electron_energy_source));
+
+  if (IS_SET_NOBOUNDARY(electrons["velocity"])) {
+    Ve.clearParallelSlices();
+    setBoundary(electrons["velocity"], fromFieldAligned(Ve));
+  }
+  if (IS_SET_NOBOUNDARY(electrons["momentum"])) {
+    NVe.clearParallelSlices();
+    setBoundary(electrons["momentum"], fromFieldAligned(NVe));
+  }
+  if (always_set_phi or IS_SET_NOBOUNDARY(state["fields"]["phi"])) {
+    // Set the potential, including boundary conditions
+    phi.clearParallelSlices();
+    setBoundary(state["fields"]["phi"], fromFieldAligned(phi));
   }
 }

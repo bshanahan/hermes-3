@@ -3,16 +3,31 @@
 #define FIXED_TEMPERATURE_H
 
 #include "component.hxx"
+#include "guarded_options.hxx"
+#include "permissions.hxx"
+
+#include <bout/bout_types.hxx>
+#include <bout/constants.hxx>
+#include <bout/field3d.hxx>
+#include <bout/globals.hxx>
+#include <bout/mesh.hxx>
+#include <bout/options.hxx>
+#include <bout/unused.hxx>
+
+#include <string>
 
 /// Set species temperature to a fixed value
 ///
-struct FixedTemperature : public Component {
+struct FixedTemperature : public NamedComponent<FixedTemperature> {
   /// Inputs
   /// - <name>
   ///   - temperature   value (expression) in units of eV
   FixedTemperature(std::string name, Options& alloptions, Solver* UNUSED(solver))
-      : name(name) {
-    AUTO_TRACE();
+      : NamedComponent(name, {readIfSet("species:{name}:density", Regions::Interior),
+                              readWrite("species:{name}:temperature"),
+                              // FIXME: Only written if density is set
+                              readWrite("species:{name}:pressure")}),
+        name(name) {
 
     auto& options = alloptions[name];
 
@@ -23,41 +38,19 @@ struct FixedTemperature : public Component {
     T = options["temperature"].doc("Constant temperature [eV]").as<Field3D>()
         / Tnorm; // Normalise
 
-    diagnose = options["diagnose"]
-      .doc("Save additional output diagnostics")
-      .withDefault<bool>(false);
-  }
-
-  /// Sets in the state the temperature and pressure of the species
-  ///
-  /// Inputs
-  /// - species
-  ///   - <name>
-  ///     - density (optional)
-  ///
-  /// Sets in the state
-  ///
-  /// - species
-  ///   - <name>
-  ///     - temperature
-  ///     - pressure (if density is set)
-  void transform(Options& state) override {
-    AUTO_TRACE();
-    auto& species = state["species"][name];
-
-    set(species["temperature"], T);
-
-    // If density is set, also set pressure
-    if (isSetFinalNoBoundary(species["density"])) {
-      // Note: The boundary of N may not be set yet
-      auto N = GET_NOBOUNDARY(Field3D, species["density"]);
-      P = N * T;
-      set(species["pressure"], P);
+    bout::globals::mesh->communicate(T);
+    if (T.isFci()) {
+      T.applyParallelBoundary("parallel_neumann_o2");
     }
+
+    diagnose = options["diagnose"]
+                   .doc("Save additional output diagnostics")
+                   .withDefault<bool>(false);
+
+    substitutePermissions("name", {name});
   }
 
   void outputVars(Options& state) override {
-    AUTO_TRACE();
     auto Tnorm = get<BoutReal>(state["Tnorm"]);
 
     // Save temperature to output files
@@ -85,17 +78,46 @@ struct FixedTemperature : public Component {
     }
   }
 
+  static constexpr auto type = "fixed_temperature";
+
 private:
   std::string name; ///< Short name of species e.g "e"
 
-  Field3D T; ///< Species temperature (normalised)
-  Field3D P; ///< Species pressure (normalised)
+  Field3D T;         ///< Species temperature (normalised)
+  Field3DParallel P; ///< Species pressure (normalised)
 
   bool diagnose; ///< Output additional fields
+
+  /// Sets in the state the temperature and pressure of the species
+  ///
+  /// Inputs
+  /// - species
+  ///   - <name>
+  ///     - density (optional)
+  ///
+  /// Sets in the state
+  ///
+  /// - species
+  ///   - <name>
+  ///     - temperature
+  ///     - pressure (if density is set)
+  void transform_impl(GuardedOptions& state) override {
+    auto species = state["species"][name];
+
+    set(species["temperature"], T);
+
+    // If density is set, also set pressure
+    if (isSetFinalNoBoundary(species["density"])) {
+      // Note: The boundary of N may not be set yet
+      auto N = GET_NOBOUNDARY(Field3D, species["density"]);
+      P = N * T;
+      set(species["pressure"], P);
+    }
+  }
 };
 
 namespace {
-RegisterComponent<FixedTemperature> registercomponentfixedtemperature("fixed_temperature");
+RegisterComponent<FixedTemperature> registercomponentfixedtemperature;
 }
 
 #endif // FIXED_TEMPERATURE_H

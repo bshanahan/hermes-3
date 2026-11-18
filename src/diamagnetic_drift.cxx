@@ -1,3 +1,5 @@
+#include <bout/derivs.hxx>
+#include <bout/difops.hxx>
 #include <bout/fv_ops.hxx>
 #include <bout/vecops.hxx>
 
@@ -6,17 +8,19 @@
 using bout::globals::mesh;
 
 DiamagneticDrift::DiamagneticDrift(std::string name, Options& alloptions,
-                                   Solver* UNUSED(solver)) {
+                                   Solver* UNUSED(solver))
+    : NamedComponent(name, {readIfSet("species:{all_species}:{input}"),
+                            readWrite("species:{all_species}:{output}")}) {
 
   // Get options for this component
   auto& options = alloptions[name];
-
+  const auto* coord = mesh->getCoordinates();
   bndry_flux =
       options["bndry_flux"].doc("Allow fluxes through boundary?").withDefault<bool>(true);
 
   diamag_form = options["diamag_form"]
-    .doc("Form of diamagnetic drift: 0 = gradient; 1 = divergence")
-    .withDefault(Field2D(1.0));
+                    .doc("Form of diamagnetic drift: 0 = gradient; 1 = divergence")
+                    .withDefault(Field2D(1.0));
 
   // Read curvature vector
   Curlb_B.covariant = false; // Contravariant
@@ -25,8 +29,8 @@ DiamagneticDrift::DiamagneticDrift(std::string name, Options& alloptions,
   }
 
   Options& paralleltransform = Options::root()["mesh"]["paralleltransform"];
-  if (paralleltransform.isSet("type") and
-      paralleltransform["type"].as<std::string>() == "shifted") {
+  if (paralleltransform.isSet("type")
+      and paralleltransform["type"].as<std::string>() == "shifted") {
     Field2D I;
     if (mesh->get(I, "sinty")) {
       I = 0.0;
@@ -45,27 +49,53 @@ DiamagneticDrift::DiamagneticDrift(std::string name, Options& alloptions,
   Curlb_B.y *= SQ(Lnorm);
   Curlb_B.z *= SQ(Lnorm);
 
-  Curlb_B *= 2. / mesh->getCoordinates()->Bxy;
+  Curlb_B *= 2. / coord->Bxy();
 
-  // Set drift to zero through sheath boundaries.
-  // Flux through those cell faces should be set by sheath.
-  for (RangeIterator r = mesh->iterateBndryLowerY(); !r.isDone(); r++) {
-    Curlb_B.y(r.ind, mesh->ystart - 1) = -Curlb_B.y(r.ind, mesh->ystart);
+  logB = log(coord->Bxy());
+
+  if (mesh->isFci()) {
+    bracket_factor = sqrt(coord->g_22()) / (coord->J() * coord->Bxy());
+  } else {
+    bracket_factor = 1.0;
   }
-  for (RangeIterator r = mesh->iterateBndryUpperY(); !r.isDone(); r++) {
-    Curlb_B.y(r.ind, mesh->yend + 1) = -Curlb_B.y(r.ind, mesh->yend);
+
+  // Fci does not use Curlb_B
+  if (!mesh->isFci()) {
+    // Set drift to zero through sheath boundaries.
+    // Flux through those cell faces should be set by sheath.
+    for (RangeIterator r = mesh->iterateBndryLowerY(); !r.isDone(); r++) {
+      for (int k = 0; k < Curlb_B.y.getNz(); ++k) {
+        Curlb_B.y(r.ind, mesh->ystart - 1, k) = -Curlb_B.y(r.ind, mesh->ystart, k);
+      }
+    }
+    for (RangeIterator r = mesh->iterateBndryUpperY(); !r.isDone(); r++) {
+      for (int k = 0; k < Curlb_B.y.getNz(); ++k) {
+        Curlb_B.y(r.ind, mesh->yend + 1, k) = -Curlb_B.y(r.ind, mesh->yend, k);
+      }
+    }
   }
+
+  // FIXME: density, pressure, and momentum will not be read even if
+  // they are defined if charge and temperature were not defined for
+  // that species.
+  substitutePermissions("input",
+                        {"charge", "temperature", "density", "pressure", "momentum"});
+  // FIXME: These will actually only be written if density, pressure,
+  // and momentum are set, respectively. They also require charge and
+  // temperature to have been set.
+  substitutePermissions("output", {"density_source", "energy_source", "momentum_source"});
 }
 
-void DiamagneticDrift::transform(Options& state) {
+void DiamagneticDrift::transform_impl(GuardedOptions& state) {
   // Iterate through all subsections
-  Options& allspecies = state["species"];
+  GuardedOptions allspecies = state["species"];
 
   for (auto& kv : allspecies.getChildren()) {
-    Options& species = allspecies[kv.first]; // Note: Need non-const
+    GuardedOptions species = allspecies[kv.first]; // Note: Need non-const
 
-    if (!(species.isSet("charge") and species.isSet("temperature")))
+    if (!(species.isSet("charge") and species.isSet("temperature"))) {
       continue; // Skip, go to next species
+    }
 
     // Calculate diamagnetic drift velocity for this species
     auto q = get<BoutReal>(species["charge"]);
@@ -79,28 +109,51 @@ void DiamagneticDrift::transform(Options& state) {
 
     if (IS_SET(species["density"])) {
       auto N = GET_VALUE(Field3D, species["density"]);
+      if (mesh->isFci()) {
 
-      // Divergence form: Div(n v_D)
-      Field3D div_form = FV::Div_f_v(N, vD, bndry_flux);
-      // Gradient form: Curlb_B dot Grad(N T / q)
-      Field3D grad_form = Curlb_B * Grad(N * T / q);
+        subtract(species["density_source"],
+                 2 * bracket(logB, T * N / q, BRACKET_ARAKAWA) * bracket_factor);
 
-      subtract(species["density_source"], diamag_form * div_form + (1. - diamag_form) * grad_form);
+      } else {
+        // Divergence form: Div(n v_D)
+        Field3D div_form = FV::Div_f_v(N, vD, bndry_flux);
+        // Gradient form: Curlb_B dot Grad(N T / q)
+        Field3D grad_form = Curlb_B * Grad(N * T / q);
+
+        subtract(species["density_source"],
+                 diamag_form * div_form + (1. - diamag_form) * grad_form);
+      }
     }
 
     if (IS_SET(species["pressure"])) {
       auto P = get<Field3D>(species["pressure"]);
+      if (mesh->isFci()) {
 
-      Field3D div_form = FV::Div_f_v(P, vD, bndry_flux);
-      Field3D grad_form = Curlb_B * Grad(P * T / q);
-      subtract(species["energy_source"], (5. / 2) * (diamag_form * div_form + (1. - diamag_form) * grad_form));
+        subtract(species["energy_source"], (5.0 / 2.0) * 2.0
+                                               * bracket(logB, T * P / q, BRACKET_ARAKAWA)
+                                               * bracket_factor);
+
+      } else {
+        Field3D div_form = FV::Div_f_v(P, vD, bndry_flux);
+        Field3D grad_form = Curlb_B * Grad(P * T / q);
+        subtract(species["energy_source"],
+                 (5. / 2) * (diamag_form * div_form + (1. - diamag_form) * grad_form));
+      }
     }
 
     if (IS_SET(species["momentum"])) {
       auto NV = get<Field3D>(species["momentum"]);
-      Field3D div_form = FV::Div_f_v(NV, vD, bndry_flux);
-      Field3D grad_form = Curlb_B * Grad(NV * T / q);
-      subtract(species["momentum_source"], diamag_form * div_form + (1. - diamag_form) * grad_form);
+      if (mesh->isFci()) {
+
+        subtract(species["momentum_source"],
+                 2 * bracket(logB, T * NV / q, BRACKET_ARAKAWA) * bracket_factor);
+
+      } else {
+        Field3D div_form = FV::Div_f_v(NV, vD, bndry_flux);
+        Field3D grad_form = Curlb_B * Grad(NV * T / q);
+        subtract(species["momentum_source"],
+                 diamag_form * div_form + (1. - diamag_form) * grad_form);
+      }
     }
   }
 }

@@ -9,14 +9,13 @@
 
 #include <bout/vector2d.hxx>
 
+#if not BOUT_USE_METRIC_3D
+
 /// Neutral gas model, evolving three components of velocity as axisymmetric fields
 ///
 /// Evolves neutral density, pressure and velocity as Field2D quantities
-struct NeutralFullVelocity : public Component {
+struct NeutralFullVelocity : public NamedComponent<NeutralFullVelocity> {
   NeutralFullVelocity(const std::string& name, Options& options, Solver* solver);
-
-  /// Modify the given simulation state
-  void transform(Options& state) override;
 
   /// Use the final simulation state to update internal state
   /// (e.g. time derivatives)
@@ -25,13 +24,16 @@ struct NeutralFullVelocity : public Component {
   /// Add extra fields for output, or set attributes e.g docstrings
   void outputVars(Options& state) override;
 
+  static constexpr auto type = "neutral_full_velocity";
+
 private:
   Coordinates* coord; // Coordinate system
 
-  std::string name; // Name of this species
-  BoutReal AA;      // Atomic mass
+  BoutReal AA; // Atomic mass
 
   BoutReal density_floor; ///< Floor when dividing by density
+  BoutReal temperature_floor;
+  BoutReal pressure_floor; ///< Minimum Pn used when dividing Pn by Nn to get Tn.
 
   Field2D Nn2D;                // Neutral gas density (evolving)
   Field2D Pn2D;                // Neutral gas pressure (evolving)
@@ -58,18 +60,53 @@ private:
   BoutReal neutral_conduction; // Neutral gas thermal conduction
   BoutReal neutral_gamma;      // Heat transmission for neutrals
 
+  std::vector<std::string> collision_names; ///< Collisions used for collisionality
+  std::string
+      diffusion_collisions_mode; ///< Collision selection, either afn or multispecies
+  Field2D nu;                    ///< Collisionality to use for diffusion
+
+  Field2D Dnn;            ///< Diffusion coefficient
+  Field2D kappa_n, eta_n; ///< Neutral conduction and viscosity
+
+  BoutReal flux_limit; ///< Diffusive flux limit
+  BoutReal neutral_lmax;
+  BoutReal diffusion_limit; ///< Maximum diffusion coefficient
+
   // Toroidal advection
-  bool toroidal_flow;      ///< Evolve toroidal flow?
-  bool momentum_advection; ///< Include advection of momentum?
-  bool curved_torus;       ///< Include toroidal curvature in momentum advection?
+  bool toroidal_flow;           ///< Evolve toroidal flow?
+  bool momentum_advection;      ///< Include advection of momentum?
+  bool curved_torus;            ///< Include toroidal curvature in momentum advection?
+  bool constant_transport_coef; ///< Use constant transport coefficients?
+
+  bool zero_timederivs; ///< Set the time derivatives to zero?
+  bool output_ddt;      ///< Save time derivatives?
 
   bool diagnose; ///< Output additional diagnostics?
   Field2D Vnpar; ///< Parallel flow velocity diagnostic
+
+  Field2D density_source, pressure_source; ///< External input source
+  Field2D Sn, Sp, Snv;                     ///< Particle, pressure and momentum source
+
+  /// Sets
+  /// - species
+  ///   - <name>
+  ///     - AA
+  ///     - density
+  ///     - momentum
+  ///     - pressure
+  ///     - temperature
+  ///     - velocity
+  void transform_impl(GuardedOptions& state) override;
 };
 
 namespace {
-RegisterComponent<NeutralFullVelocity>
-    registersolverneutralfullvelocity("neutral_full_velocity");
+RegisterComponent<NeutralFullVelocity> registersolverneutralfullvelocity;
 }
-
+#else  // not BOUT_USE_METRIC_3D
+namespace {
+RegisterUnavailableComponent
+    registersolverneutralfullvelocity("neutral_full_velocity",
+                                      "This not (yet) compatible with 3D metrics");
+}
+#endif // not BOUT_USE_METRIC_3D
 #endif // NEUTRAL_FULL_VELOCITY_H

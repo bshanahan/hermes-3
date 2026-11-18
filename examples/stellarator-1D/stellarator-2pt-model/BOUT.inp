@@ -16,6 +16,7 @@ MXG = 0  # No guard cells in X
 nx = 1
 ny = 200   # Resolution along field-line
 nz = 1
+J = 1
 
 length = 100          # Length of the domain in meters
 length_xpt = length   # Length from midplane to X-point [m]
@@ -32,19 +33,21 @@ ixseps2 = -1          # Necessary to set boundary conditions in y
 # to electron pressure using electron force balance
 # Collisions are needed to calculate heat conduction
 
-components = i, e, sheath_boundary, collisions, binormal_stpm, electron_force_balance
+components = (i, e, sheath_boundary, braginskii_collisions, braginskii_friction,
+              braginskii_heat_exchange, braginskii_heat_exchange, binormal_stpm,
+              electron_force_balance, braginskii_conduction)
 
 normalise_metric = true   # Normalise the input metric?
 
 Nnorm = 1e19   # [m^-3]
 Bnorm = 2.5    # [T]
-Tnorm = 100    # [eV] 
+Tnorm = 100    # [eV]
 
 [solver]
 mxstep = 10000   # maximum step for solver before failure.
 
 [sheath_boundary]
-lower_y = false  
+lower_y = false
 upper_y = true
 
 [binormal_stpm]

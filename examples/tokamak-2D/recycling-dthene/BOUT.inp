@@ -16,7 +16,9 @@ type = shifted
 mxstep = 10000
 
 [hermes]
-components = d+, d, t+, t, he+, he, ne+, ne, e, collisions, sheath_boundary, recycling, reactions
+components = (d+, d, t+, t, he+, he, ne+, ne, e, braginskii_collisions,
+              braginskii_friction, braginskii_heat_exchange, sheath_boundary,
+              reactions, braginskii_conduction, recycling)
 
 Nnorm = 2e18  # Reference density [m^-3]
 Bnorm = 1   # Reference magnetic field [T]
@@ -50,10 +52,6 @@ bndry_all = dirichlet(0.1)   # All other boundaries low density
 function = 1
 bndry_core = dirichlet(1.0)  # Core boundary
 bndry_all = dirichlet(0.01)   # All other boundaries
-
-[Td+]
-bndry_core = dirichlet(1.0)  # Core boundary
-bndry_all = dirichlet(0.1)   # All other boundaries
 
 ################################################################
 # Deuterium neutrals
@@ -92,10 +90,6 @@ function = 1
 bndry_core = dirichlet(1.0)  # Core boundary
 bndry_all = dirichlet(0.01)   # All other boundaries
 
-[Tt+]
-bndry_core = dirichlet(1.0)  # Core boundary
-bndry_all = dirichlet(0.1)   # All other boundaries
-
 ################################################################
 # Tritium neutrals
 
@@ -130,12 +124,8 @@ bndry_all = dirichlet(0.1)   # All other boundaries low density
 
 [Phe+]
 function = 0.01
-bndry_core = dirichlet(0.1)  # Core boundary 
+bndry_core = dirichlet(0.1)  # Core boundary
 bndry_all = dirichlet(0.01)   # All other boundaries
-
-[The+]
-bndry_core = dirichlet(1.0)  # Core boundary
-bndry_all = dirichlet(0.1)   # All other boundaries
 
 ################################################################
 # Helium neutrals
@@ -174,10 +164,6 @@ function = 0.001
 bndry_core = dirichlet(0.01)  # Core boundary
 bndry_all = dirichlet(0.001)   # All other boundaries
 
-[Tne+]
-bndry_core = dirichlet(1.0)  # Core boundary
-bndry_all = dirichlet(0.1)   # All other boundaries
-
 ################################################################
 # Neon neutrals
 
@@ -205,10 +191,6 @@ thermal_conduction = true
 function = 1
 bndry_core = dirichlet(1.0)  # Core boundary high density
 bndry_all = dirichlet(0.01)   # All other boundaries low density
-
-[Te]
-bndry_core = dirichlet(1.0)  # Core boundary high density
-bndry_all = dirichlet(0.1)   # All other boundaries low density
 
 ################################################################
 

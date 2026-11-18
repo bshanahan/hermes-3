@@ -1,6 +1,7 @@
 #pragma once
 
 #include <bout/boundary_region.hxx>
+#include <bout/boundary_region_iter.hxx>
 #include <bout/bout_types.hxx>
 #include <bout/boutcomm.hxx>
 #include <bout/boutexception.hxx>
@@ -12,6 +13,7 @@
 #include <bout/griddata.hxx>
 #include <bout/mesh.hxx>
 #include <bout/mpi_wrapper.hxx>
+#include <bout/paralleltransform.hxx>
 #include <bout/region.hxx>
 #include <bout/sys/range.hxx>
 #include <bout/unused.hxx>
@@ -19,6 +21,8 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -37,12 +41,15 @@ class Options;
 ///   else will likely **not** work!
 class FakeMesh : public Mesh {
 public:
-  FakeMesh(int nx, int ny, int nz, MpiWrapper& mpi_in) {
+  FakeMesh(int nx, int ny, int nz, MpiWrapper& mpi_in, int mxg = 1) {
     // Mesh only on one process, so global and local indices are the
     // same
     GlobalNx = nx;
     GlobalNy = ny;
     GlobalNz = nz;
+    GlobalNxNoBoundaries = nx - 2 * mxg;
+    GlobalNyNoBoundaries = ny - 2;
+    GlobalNzNoBoundaries = nz;
     LocalNx = nx;
     LocalNy = ny;
     LocalNz = nz;
@@ -50,20 +57,29 @@ public:
     OffsetY = 0;
     OffsetZ = 0;
 
+    // These bits only for ADIOS2, also boring due to single process
+    MapCountX = nx - 2 * mxg;
+    MapCountY = ny - 2;
+    MapCountZ = nz;
+    MapGlobalX = nx;
+    MapGlobalY = ny;
+    MapGlobalZ = nz;
+    MapLocalX = nx - 2 * mxg;
+    MapLocalY = ny - 2;
+    MapLocalZ = nz;
+
     // Small "inner" region
-    xstart = 1;
-    xend = nx - 2;
+    xstart = mxg;
+    xend = nx - 2 * mxg;
     ystart = 1;
     yend = ny - 2;
-    zstart = 0;
+    zstart = 0; // no guards
     zend = nz - 1;
 
     StaggerGrids = false;
 
     // Unused variables
     periodicX = false;
-    NXPE = 1;
-    PE_XIND = 0;
     IncIntShear = false;
     maxregionblocksize = MAXREGIONBLOCKSIZE;
 
@@ -75,17 +91,18 @@ public:
 
   void setCoordinates(std::shared_ptr<Coordinates> coords,
                       CELL_LOC location = CELL_CENTRE) {
-    coords_map[location] = coords;
+    coords_map[location] = std::move(coords);
   }
 
   void setGridDataSource(GridDataSource* source_in) { source = source_in; }
 
   // Use this if the FakeMesh needs x- and y-boundaries
   void createBoundaries() {
-    addBoundary(new BoundaryRegionXIn("core", ystart, yend, this));
-    addBoundary(new BoundaryRegionXOut("sol", ystart, yend, this));
-    addBoundary(new BoundaryRegionYUp("upper_target", xstart, xend, this));
-    addBoundary(new BoundaryRegionYDown("lower_target", xstart, xend, this));
+    addBoundary(bout::boundary::NewBoundaryRegionXIn("core", ystart, yend, this));
+    addBoundary(bout::boundary::NewBoundaryRegionXOut("sol", ystart, yend, this));
+    addBoundary(bout::boundary::NewBoundaryRegionYUp("upper_target", xstart, xend, this));
+    addBoundary(
+        bout::boundary::NewBoundaryRegionYDown("lower_target", xstart, xend, this));
   }
 
   comm_handle send(FieldGroup& UNUSED(g)) override { return nullptr; }
@@ -98,10 +115,17 @@ public:
     return nullptr;
   }
   int wait(comm_handle UNUSED(handle)) override { return 0; }
-  int getNXPE() override { return 1; }
-  int getNYPE() override { return 1; }
-  int getXProcIndex() override { return 1; }
-  int getYProcIndex() override { return 1; }
+  int getNXPE() const override { return 1; }
+  int getNYPE() const override { return 1; }
+  int getNZPE() const override { return 1; }
+  int getXProcIndex() const override { return 0; }
+  int getYProcIndex() const override { return 0; }
+  int getZProcIndex() const override { return 0; }
+  int getProcIndex([[maybe_unused]] int X, [[maybe_unused]] int Y,
+                   [[maybe_unused]] int Z) const override {
+    return 0;
+  }
+  std::set<std::string> getPossibleBoundaries() const override { return {}; }
   bool firstX() const override { return true; }
   bool lastX() const override { return true; }
   int sendXOut(BoutReal* UNUSED(buffer), int UNUSED(size), int UNUSED(tag)) override {
@@ -120,8 +144,15 @@ public:
   }
   MPI_Comm getXcomm(int UNUSED(jy)) const override { return BoutComm::get(); }
   MPI_Comm getYcomm(int UNUSED(jx)) const override { return BoutComm::get(); }
-  bool periodicY(int UNUSED(jx)) const override { return true; }
-  bool periodicY(int UNUSED(jx), BoutReal& UNUSED(ts)) const override { return true; }
+  MPI_Comm getXZcomm() const override { return BoutComm::get(); }
+
+  // Periodic Y
+  int ix_separatrix{1000000}; // separatrix index
+
+  bool periodicY(int jx) const override { return jx < ix_separatrix; }
+  bool periodicY(int jx, BoutReal& UNUSED(ts)) const override {
+    return jx < ix_separatrix;
+  }
   int numberOfYBoundaries() const override { return 1; }
   std::pair<bool, BoutReal> hasBranchCutLower(int UNUSED(jx)) const override {
     return std::make_pair(false, 0.);
@@ -143,28 +174,36 @@ public:
   RangeIterator iterateBndryLowerInnerY() const override { return RangeIterator(); }
   RangeIterator iterateBndryUpperOuterY() const override { return RangeIterator(); }
   RangeIterator iterateBndryUpperInnerY() const override { return RangeIterator(); }
-  void addBoundary(BoundaryRegion* region) override { boundaries.push_back(region); }
-  std::vector<BoundaryRegion*> getBoundaries() override { return boundaries; }
-  std::vector<std::shared_ptr<BoundaryRegionPar>>
-  getBoundariesPar(BoundaryParType UNUSED(type)) override {
-    return std::vector<std::shared_ptr<BoundaryRegionPar>>();
+  bool hasBndryLowerY() const override { return false; }
+  bool hasBndryUpperY() const override { return false; }
+  void addBoundary(std::shared_ptr<BoundaryRegionBase> region) override {
+    boundaries.push_back(region);
+  }
+  std::vector<std::shared_ptr<BoundaryRegionBase>> getBoundaries() const override {
+    return boundaries;
+  }
+  std::vector<std::shared_ptr<bout::boundary::BoundaryRegionFCI>>
+  getBoundariesPar(BoundaryParType UNUSED(type)) const override {
+    return std::vector<std::shared_ptr<bout::boundary::BoundaryRegionFCI>>();
   }
   BoutReal GlobalX(int jx) const override { return jx; }
   BoutReal GlobalY(int jy) const override { return jy; }
+  BoutReal GlobalZ(int jz) const override { return jz / static_cast<BoutReal>(LocalNz); }
   BoutReal GlobalX(BoutReal jx) const override { return jx; }
   BoutReal GlobalY(BoutReal jy) const override { return jy; }
+  BoutReal GlobalZ(BoutReal jz) const override { return jz; }
   int getGlobalXIndex(int) const override { return 0; }
   int getGlobalXIndexNoBoundaries(int) const override { return 0; }
   int getGlobalYIndex(int y) const override { return y; }
   int getGlobalYIndexNoBoundaries(int y) const override { return y; }
-  int getGlobalZIndex(int) const override { return 0; }
-  int getGlobalZIndexNoBoundaries(int) const override { return 0; }
+  int getGlobalZIndex(int z) const override { return z; }
+  int getGlobalZIndexNoBoundaries(int z) const override { return z; }
   int getLocalXIndex(int) const override { return 0; }
   int getLocalXIndexNoBoundaries(int) const override { return 0; }
   int getLocalYIndex(int y) const override { return y; }
   int getLocalYIndexNoBoundaries(int y) const override { return y; }
-  int getLocalZIndex(int) const override { return 0; }
-  int getLocalZIndexNoBoundaries(int) const override { return 0; }
+  int getLocalZIndex(int z) const override { return z; }
+  int getLocalZIndexNoBoundaries(int z) const override { return z; }
 
   void initDerivs(Options* opt) {
     StaggerGrids = true;
@@ -212,19 +251,18 @@ public:
                                  "RGN_OUTER_X"};
 
     // Sum up and get unique points in the boundaries defined above
-    addRegion2D("RGN_BNDRY",
-                std::accumulate(begin(boundary_names), end(boundary_names),
-                                Region<Ind2D>{},
-                                [this](Region<Ind2D>& a, const std::string& b) {
-                                  return a + getRegion2D(b);
-                                })
-                    .unique());
+    addRegion2D("RGN_BNDRY", std::accumulate(begin(boundary_names), end(boundary_names),
+                                             Region<Ind2D>{},
+                                             [&](Region<Ind2D> a, const std::string& b) {
+                                               return std::move(a) + getRegion2D(b);
+                                             })
+                                 .unique());
 
     addRegion3D("RGN_BNDRY",
                 std::accumulate(begin(boundary_names), end(boundary_names),
                                 Region<Ind3D>{},
-                                [this](Region<Ind3D>& a, const std::string& b) {
-                                  return a + getRegion3D(b);
+                                [this](Region<Ind3D> a, const std::string& b) {
+                                  return std::move(a) + getRegion3D(b);
                                 })
                     .unique());
     addRegionPerp("RGN_BNDRY",
@@ -235,7 +273,7 @@ public:
   using Mesh::msg_len;
 
 private:
-  std::vector<BoundaryRegion*> boundaries;
+  std::vector<std::shared_ptr<BoundaryRegionBase>> boundaries;
 };
 
 /// FakeGridDataSource provides a non-null GridDataSource* source to use with FakeMesh, to
@@ -251,7 +289,7 @@ public:
   /// Take an rvalue (e.g. initializer list), convert to lvalue and delegate constructor
   FakeGridDataSource(Options&& values) : FakeGridDataSource(values) {}
 
-  bool hasVar(const std::string& UNUSED(name)) override { return false; }
+  bool hasVar(const std::string& name) const override { return values.isSet(name); }
 
   bool get([[maybe_unused]] Mesh* m, std::string& sval, const std::string& name,
            const std::string& def = "") override {
@@ -328,4 +366,55 @@ public:
 
 private:
   Options values; ///< Store values to be returned by get()
+};
+
+// A mock ParallelTransform to test transform_from_field_aligned
+// property of FieldFactory. For now, the transform just returns the
+// negative of the input. Ideally, this will get moved to GoogleMock
+// when we start using it.
+//
+// Can turn off the ability to do the transform. Should still be valid
+class MockParallelTransform : public ParallelTransform {
+public:
+  MockParallelTransform(Mesh& mesh, bool allow_transform_)
+      : ParallelTransform(mesh), allow_transform(allow_transform_) {}
+  ~MockParallelTransform() = default;
+
+  void calcParallelSlices(Field3D&) override {}
+
+  bool canToFromFieldAligned() const override { return allow_transform; }
+
+  bool requiresTwistShift(bool, YDirectionType) override { return false; }
+
+  void checkInputGrid() override {}
+
+  Field3D fromFieldAligned(const Field3D& f, const std::string&) override {
+    if (f.getDirectionY() != YDirectionType::Aligned) {
+      throw BoutException("Unaligned field passed to fromFieldAligned");
+    }
+    return -f;
+  }
+
+  FieldPerp fromFieldAligned(const FieldPerp& f, const std::string&) override {
+    if (f.getDirectionY() != YDirectionType::Aligned) {
+      throw BoutException("Unaligned field passed to fromFieldAligned");
+    }
+    return -f;
+  }
+
+  Field3D toFieldAligned(const Field3D& f, const std::string&) override {
+    if (f.getDirectionY() != YDirectionType::Standard) {
+      throw BoutException("Aligned field passed to toFieldAligned");
+    }
+    return -f;
+  }
+  FieldPerp toFieldAligned(const FieldPerp& f, const std::string&) override {
+    if (f.getDirectionY() != YDirectionType::Standard) {
+      throw BoutException("Aligned field passed to toFieldAligned");
+    }
+    return -f;
+  }
+
+private:
+  const bool allow_transform;
 };

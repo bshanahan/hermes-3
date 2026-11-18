@@ -25,25 +25,25 @@ In 1D, Hermes-3 follows a single flux tube, typically from midplane to target.
 The code inherits a lot of capability and convention from the code `SD1D
 <https://github.com/boutproject/SD1D/>`_ - see `Dudson 2019
 <https://iopscience.iop.org/article/10.1088/1361-6587/ab1321/meta>`_. for a good description
-of the equations and capabilities. Note that SD1D features a "plasma" pressure equation, 
+of the equations and capabilities. Note that SD1D features a "plasma" pressure equation,
 combining the ion and electron pressures, which are separate in Hermes-3.
 
 There is an `xHermes 1D post-processing example
 <https://github.com/boutproject/xhermes/blob/main/examples/1d-postprocessing.ipynb>`_
 to guide you through results analysis.
 
-For published Hermes-1D applications, see `Body 2024 
+For published Hermes-1D applications, see `Body 2024
 <https://www.sciencedirect.com/science/article/pii/S2352179124002424>`_
-and `Holt 2024 <https://iopscience.iop.org/article/10.1088/1741-4326/ad4f9e/meta>`_. 
+and `Holt 2024 <https://iopscience.iop.org/article/10.1088/1741-4326/ad4f9e/meta>`_.
 
 
 
 
 
-.. _1D-threshold:
+.. _sec-1D-threshold:
 
 1D-threshold
-~~~~~~
+~~~~~~~~~~~~
 
 This simulates a similar setup to the `SD1D
 <https://github.com/boutproject/SD1D/>`_ code: A 1D domain, with a
@@ -72,19 +72,21 @@ function of index:
 where `dymin` is 0.1 here, and sets the smallest grid spacing (at the
 target) as a fraction of the average grid spacing.
 
-The components are ion species `d+`, atoms `d`, electrons `e`:
+The components are ion species ``d+``, atoms ``d``, electrons ``e``:
 
 .. code-block:: ini
 
    [hermes]
    components = (d+, d, e,
-              sheath_boundary_simple, collisions, recycling, reactions,
-              electron_force_balance, neutral_parallel_diffusion)
+                 sheath_boundary_simple, braginskii_collisions,
+                 braginskii_friction, braginskii_heat_exchange,
+                 recycling, reactions, electron_force_balance,
+                 neutral_parallel_diffusion, braginskii_conduction)
 
-The electron velocity is set to the ion by specifying :ref:`zero_current`;
+The electron velocity is set to the ion by specifying :ref:`sec-zero_current`;
 A sheath boundary is included; Collisions are needed to be able to calculate
 heat conduction, as well as neutral diffusion rates; Recycling at the targets
-provides a source of atoms; :ref:`neutral_parallel_diffusion` simulates cross-field
+provides a source of atoms; :ref:`sec-neutral_parallel_diffusion` simulates cross-field
 diffusion in a 1D system. The electron force balance links electron pressure gradient
 with the ion momentum equation. Please see the relevant documentation pages about these
 components for further information.
@@ -110,7 +112,7 @@ The reactions component is a group, which lists the reactions included:
           )
 
 
-.. 
+..
    1D-te-ti
    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -122,7 +124,7 @@ The reactions component is a group, which lists the reactions included:
       :name: 1d_te_ti
       :alt:
       :width: 60%
-      
+
       Evolution of pressure, starting from a top hat. Input in ``examples/1D-te-ti``.
 
    To run this example:
@@ -205,12 +207,12 @@ The reactions component is a group, which lists the reactions included:
 Simulations where the dynamics along the magnetic field is not
 included, or only included in a parameterised way as sources or
 sinks. The field line direction is then "into the page", and the
-domain represents a slice somewhere along the field line, e.g. 
+domain represents a slice somewhere along the field line, e.g.
 at the midplane.
 These are useful for the study of the basic physics of plasma
-"blobs" / filaments, and tokamak edge turbulence. 
+"blobs" / filaments, and tokamak edge turbulence.
 
-.. _Blob2d:
+.. _sec-Blob2d:
 
 Blob2d
 ~~~~~~
@@ -223,7 +225,7 @@ closure is used for the parallel current.
    :name: fig-blob2d
    :alt:
    :scale: 50
-   
+
    Electron density Ne at three times, showing propagation to the right
 
 The model components are
@@ -241,7 +243,7 @@ The electron component consists of two types:
    type = evolve_density, isothermal
 
 
-The :ref:`evolve_density` component type evolves the electron density `Ne`. This component
+The :ref:`sec-evolve_density` component type evolves the electron density `Ne`. This component
 has several options, which are set in the same section e.g.
 
 .. code-block:: ini
@@ -256,9 +258,9 @@ and so solves the equation:
    \frac{\partial n_e}{\partial t} =& - \nabla\cdot\left(n_e\mathbf{v}_{E\times B}\right) + \nabla\cdot{\frac{1}{e}\mathbf{j}_{sh}}
    \end{aligned}
 
-The :ref:`isothermal` component type sets the temperature to be a constant, and using
+The :ref:`sec-isothermal` component type sets the temperature to be a constant, and using
 the density then sets the pressure. The constant temperature is also
-set in this `[e]` section:
+set in this ``[e]`` section:
 
 .. code-block:: ini
 
@@ -274,9 +276,10 @@ so that the equation solved is
 
 where :math:`T_e` is the fixed electron temperature (5eV).
 
-The :ref:`vorticity` component uses the pressure to calculate the diamagnetic current,
-so must come after the `e` component. This component then calculates the potential.
-Options to control the vorticity component are set in the `[vorticity]` section.
+The :ref:`sec-vorticity` component uses the pressure to calculate the
+diamagnetic current. This component then calculates the potential.
+Options to control the vorticity component are set in the
+``[vorticity]`` section.
 
 .. math::
 
@@ -285,8 +288,7 @@ Options to control the vorticity component are set in the `[vorticity]` section.
    \nabla\cdot\left(\frac{1}{B^2}\nabla_\perp\phi\right) = \omega
    \end{aligned}
 
-The `sheath_closure` component uses the potential, so must come after :ref:`vorticity`.
-Options are also set as
+The `sheath_closure` component uses the potential. Options are also set as
 
 .. code-block:: ini
 
@@ -303,7 +305,7 @@ This adds the equation
 
 where :math:`L_{||}` is the connection length.
 
-.. _Blob2d-Te-Ti:
+.. _sec-Blob2d-Te-Ti:
 
 Blob2D-Te-Ti
 ~~~~~~~~~~~~
@@ -316,7 +318,7 @@ current.
    :name: fig-blob2d-te-ti
    :alt:
    :scale: 50
-   
+
    Electron density Ne at three times, showing propagation to the right and downwards
 
 The model components are
@@ -337,14 +339,14 @@ The electron component evolves density (saved as `Ne`) and pressure
 
 
 The ion component sets the ion density from the electron density, by
-using the quasineutrality of the plasma; the ion pressure (`Ph+`) is evolved.
+using the quasineutrality of the plasma; the ion pressure (``Ph+``) is evolved.
 
 .. code-block:: ini
-   
+
    [h+]
    type = quasineutral, evolve_pressure
 
-The equations this solves are similar to the previous :ref:`Blob2d` case, except
+The equations this solves are similar to the previous :ref:`sec-Blob2d` case, except
 now there are pressure equations for both ions and electrons:
 
 .. math::
@@ -359,10 +361,12 @@ now there are pressure equations for both ions and electrons:
    \nabla\cdot{\mathbf{j}_{sh}} =& \frac{n_e\phi}{L_{||}}
    \end{aligned}
 
+.. _subsec-2d-drift-plane-turbulence-te-ti:
+
 2D-drift-plane-turbulence-te-ti
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A 2D turbulence simulation, similar to the :ref:`Blob2d-Te-Ti` case, but with
+A 2D turbulence simulation, similar to the :ref:`sec-Blob2d-Te-Ti` case, but with
 extra source and sink terms, so that a statistical steady state of
 source-driven turbulence can be reached.
 
@@ -384,7 +388,7 @@ The electron component evolves density (saved as `Ne`) and pressure
 
 
 The ion component sets the ion density from the electron density, by
-using the quasineutrality of the plasma; the ion pressure (`Ph+`) is evolved.
+using the quasineutrality of the plasma; the ion pressure (``Ph+``) is evolved.
 
 .. code-block:: ini
 
@@ -400,11 +404,11 @@ The sheath closure now specifies that additional sink terms should be added
     potential_offset = 0.0  # Potential at which sheath current is zero
     sinks = true
 
-and radially localised sources are added in the `[Ne]`, `[Pe]`, and `[Ph+]`
+and radially localised sources are added in the ``[Ne]``, ``[Pe]``, and ``[Ph+]``
 sections.
 
 The equations this solves are the same as the previous
-:ref:`Blob2d-Te-Ti` case, except wih extra source and sink terms. In
+:ref:`sec-Blob2d-Te-Ti` case, except wih extra source and sink terms. In
 SI units (except temperatures in eV) the equations are:
 
 .. math::
@@ -450,8 +454,8 @@ These are transport simulations, where the cross-field transport is given
 by diffusion, and fluid-like equations are used for the parallel dynamics
 (as in the 1D flux tube cases).
 
-The input settings (in BOUT.inp) are set to read the grid from a file `tokamak.nc`.
-This is linked to a default file `compass-36x48.grd.nc`, a COMPASS-like lower single
+The input settings (in BOUT.inp) are set to read the grid from a file :file:`tokamak.nc`.
+This is linked to a default file :file:`compass-36x48.grd.nc`, a COMPASS-like lower single
 null tokamak equilibrium. Due to the way that BOUT++ uses communications between
 processors to implement branch cuts, these simulations require a multiple of 6 processors.
 You don't usually need 6 physical cores to run these cases, if MPI over-subscription
@@ -460,7 +464,7 @@ is enabled.
 heat-transport
 ~~~~~~~~~~~~~~
 
-In `examples/tokamak/heat-transport`, this evolves only electron pressure with
+In :file:`examples/tokamak/heat-transport`, this evolves only electron pressure with
 a fixed density. It combines cross-field diffusion with parallel heat conduction
 and a sheath boundary condition.
 
@@ -473,15 +477,17 @@ From the build directory:
    cd examples/tokamak
    mpirun -np 6 ../../hermes-3 -d heat-transport
 
-That will read the grid from `tokamak.nc`, which by default links to
-the `compass-36x48.grd.nc` file.
+That will read the grid from :file:`tokamak.nc`, which by default links to
+the :file:`compass-36x48.grd.nc` file.
 
-The components of the model are given in `heat-transport/BOUT.inp`:
+The components of the model are given in :file:`heat-transport/BOUT.inp`:
 
 .. code-block:: ini
 
    [hermes]
-   components = e, h+, collisions, sheath_boundary_simple
+   components = (e, h+,
+                 braginskii_collisions, braginskii_friction, braginskii_heat_exchange,
+                 sheath_boundary_simple, braginskii_conduction)
 
 We have two species, electrons and hydrogen ions, and add collisions
 between them and a simple sheath boundary condition.
@@ -524,7 +530,7 @@ boundary conditions on `Pe`:
 
    [Pe]
    function = 1
-   bndry_core = dirichlet(1.0)  # Core boundary high pressure 
+   bndry_core = dirichlet(1.0)  # Core boundary high pressure
    bndry_all = neumann
 
 That sets the pressure initially uniform, to a normalised value of 1,
@@ -560,10 +566,11 @@ species. The name of that species is given by the `temperature_from` option:
 
    temperature_from = e  # Set Th+ = Te
 
-The `collisions` component is described in the manual, and calculates both electron-electron
-and electron-ion collisions. These can be disabled if desired, using individual options.
-There are also ion-ion, electron-neutral, ion-neutral and neutral-neutral collisions that
-are not used here.
+The `braginskii_collisions` component is described in the manual, and
+calculates both electron-electron and electron-ion collisions. These
+can be disabled if desired, using individual options.  There are also
+ion-ion, electron-neutral, ion-neutral and neutral-neutral collisions
+that are not used here.
 
 The `sheath_boundary_simple` component is a simplified Bohm-Chodura sheath boundary
 condition, that allows the sheath heat transmission coefficient to be specified for
@@ -584,18 +591,19 @@ The equations solved by this example are:
    \end{aligned}
 
 The calculation of the Coulomb logarithms follows the NRL formulary,
-and the above expression is used for temperatures above 10eV. See
-the `collisions` manual section for the expressions used in other regimes.
+and the above expression is used for temperatures above 10eV. See the
+`braginskii_collisions` manual section for the expressions used in
+other regimes.
 
 recycling-dthene
 ~~~~~~~~~~~~~~~~
 
 Warning
    Impurity transport can be notoriously computationally expensive to run.
-   If you are interested in 2D transport simulations, consider starting 
+   If you are interested in 2D transport simulations, consider starting
    with the much simpler ``recycling`` example (not yet in documentation)
-   
-The `recycling-dthene` example includes cross-field diffusion,
+
+The ``recycling-dthene`` example includes cross-field diffusion,
 parallel flow and heat conduction, collisions between species, sheath
 boundary conditions and recycling. It simulates the density, parallel
 flow and pressure of the electrons; ion species D+, T+, He+, Ne+; and
@@ -615,18 +623,19 @@ which couple multiple species.
 .. code-block:: ini
 
    [hermes]
-   components = (d+, d, t+, t, he+, he, ne+, ne, e,
-                 collisions, sheath_boundary, recycling, reactions)
+   components = (d+, d, t+, t, he+, he, ne+, ne, e, braginskii_collisions,
+                 braginskii_friction, braginskii_heat_exchange, sheath_boundary,
+                 recycling, reactions, braginskii_conduction)
 
 Note that long lists like this can be split across multiple lines by
-using parentheses. 
-                 
+using parentheses.
+
 Each ion species has a set of components, to evolve the density,
 momentum and pressure. Anomalous diffusion adds diffusion of
 particles, momentum and energy. For example deuterium ions contain:
 
 .. code-block:: ini
-   
+
    [d+]
    type = evolve_density, evolve_momentum, evolve_pressure, anomalous_diffusion
    AA = 2
@@ -635,7 +644,7 @@ particles, momentum and energy. For example deuterium ions contain:
 Atomic reactions are specified as a list:
 
 .. code-block:: ini
-   
+
    [reactions]
    type = (
         d + e -> d+ + 2e,   # Deuterium ionisation
@@ -648,7 +657,7 @@ Atomic reactions are specified as a list:
 
 
 3D Turbulence
-------------
+-------------
 
 turbulence
 ~~~~~~~~~~~~
@@ -658,7 +667,7 @@ electron density, electron and ion parallel velocity, electron and ion
 pressure.
 
 The input file is in the Hermes-3 repository under
-``examples/tokamak/turbulence``.
+``examples/tokamak-2D/turbulence``.
 
 The lines that define the components to include in the model are:
 
@@ -666,9 +675,9 @@ The lines that define the components to include in the model are:
 
    [hermes]
    components = (e, d+, sound_speed, vorticity,
-                 sheath_boundary, collisions,
-                 diamagnetic_drift, classical_diffusion,
-                 polarisation_drift
+                 sheath_boundary, braginskii_collisions, braginskii_friction,
+                 braginskii_heat_exchange, diamagnetic_drift, classical_diffusion,
+                 polarisation_drift, braginskii_conduction
                 )
 
    [e]
@@ -731,7 +740,7 @@ divergence of the diamagnetic current is written as
 .. math::
 
    \nabla\cdot\mathbf{J}_d = \nabla\cdot\left[\left(p_e + p_i\right)\nabla\times\frac{\mathbf{b}}{B}\right]
-   
+
 
 
 The input file sets the number of output steps to take and the time
@@ -804,7 +813,5 @@ TCV-X21
 ~~~~~~~~~~~~
 
 An example based on the TCV validation in `Oliveira, Body et al. 2022
-<https://iopscience.iop.org/article/10.1088/1741-4326/ac4cde/meta>`_, 
+<https://iopscience.iop.org/article/10.1088/1741-4326/ac4cde/meta>`_,
 located in located in ``examples\tcv-x21``.
-
-

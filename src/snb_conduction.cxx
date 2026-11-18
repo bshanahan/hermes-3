@@ -1,31 +1,28 @@
-#include <bout/constants.hxx>
 #include "../include/snb_conduction.hxx"
+#include <bout/constants.hxx>
 
+#if !BOUT_USE_METRIC_3D
 #include <bout/bout.hxx>
 using bout::globals::mesh;
 
-void SNBConduction::transform(Options& state) {
-  auto& units = state["units"];
-  const auto rho_s0 = get<BoutReal>(units["meters"]);
-  const auto Tnorm = get<BoutReal>(units["eV"]);
-  const auto Nnorm = get<BoutReal>(units["inv_meters_cubed"]);
-  const auto Omega_ci = 1. / get<BoutReal>(units["seconds"]);
+void SNBConduction::transform_impl(GuardedOptions& state) {
 
-  Options& electrons = state["species"]["e"];
+  GuardedOptions electrons = state["species"]["e"];
   // Note: Needs boundary conditions on temperature
   const Field3D Te = GET_VALUE(Field3D, electrons["temperature"]) * Tnorm; // eV
   const Field3D Ne = GET_VALUE(Field3D, electrons["density"]) * Nnorm;     // In m^-3
 
   // SNB non-local heat flux. Also returns the Spitzer-Harm value for comparison
   // Note: Te in eV, Ne in Nnorm
-  Field2D dy_orig = mesh->getCoordinates()->dy;
-  mesh->getCoordinates()->dy *= rho_s0; // Convert distances to m
+  auto dy_orig = mesh->getCoordinates()->dy();
+  ASSERT2(not dy_orig.isFci());
+  dy_orig *= rho_s0; // Convert distances to m
 
   // Inputs in eV and m^-3
   Div_Q_SNB = snb.divHeatFlux(Te, Ne, &Div_Q_SH);
 
   // Restore the metric tensor
-  mesh->getCoordinates()->dy = dy_orig;
+  mesh->getCoordinates()->setDy(dy_orig);
 
   // Normalise from eV/m^3/s
   Div_Q_SNB /= Tnorm * Nnorm * Omega_ci;
@@ -38,7 +35,6 @@ void SNBConduction::transform(Options& state) {
 }
 
 void SNBConduction::outputVars(Options& state) {
-  AUTO_TRACE();
 
   if (diagnose) {
     auto Nnorm = get<BoutReal>(state["Nnorm"]);
@@ -62,3 +58,4 @@ void SNBConduction::outputVars(Options& state) {
                     {"source", "snb_conduction"}});
   }
 }
+#endif
