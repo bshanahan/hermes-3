@@ -1,3 +1,5 @@
+#include <cmath>
+#include "../include/unstructured.hxx"
 #include "hermes_utils.hxx"
 #include "bout/mesh.hxx"
 #include <bout/constants.hxx>
@@ -26,6 +28,11 @@ NeutralBoundary::NeutralBoundary(std::string name, Options& alloptions,
                 .doc("Boundary on upper y?")
                 .withDefault<bool>(true);
   sol = options["neutral_boundary_sol"].doc("Boundary on SOL?").withDefault<bool>(false);
+  us_projected_area =
+      options["neutral_boundary_projected_area"]
+          .doc("Unstructured grids: on wall faces crossed by the field, use the area "
+               "perpendicular to B instead of the surface area?")
+          .withDefault<bool>(false);
   pfr = options["neutral_boundary_pfr"].doc("Boundary on PFR?").withDefault<bool>(false);
 
   target_energy_refl_factor = options["target_energy_refl_factor"]
@@ -88,6 +95,63 @@ void NeutralBoundary::transform_impl(GuardedOptions& state) {
   Coordinates* coord = mesh->getCoordinates();
   target_energy_source = 0;
   wall_energy_source = 0;
+
+  if (Unstructured::active()) {
+    // Flat-cell grid: every wall face reflects neutrals and takes energy from
+    // them. Faces the field crosses use the target coefficients, the others
+    // the SOL coefficients. The area is the true surface area of the face,
+    // unless us_projected_area asks for the area perpendicular to B on
+    // field-crossing faces (which is what the structured target loop uses).
+    const auto& us = Unstructured::get();
+    Nn.allocate();
+    Pn.allocate();
+    Tn.allocate();
+    Vn.allocate();
+    NVn.allocate();
+    energy_source.allocate();
+    target_energy_source.allocate();
+    wall_energy_source.allocate();
+    const BoutReal T_FC = 3 / Tnorm; // Franck-Condon temperature
+    for (int f = 0; f < us.nfaces; f++) {
+      if (us.face_kind[f] != Unstructured::wall) {
+        continue;
+      }
+      const int c = us.faceL[f];
+      const int i = us.ys + c;
+      const int g = us.ys + us.faceR[f];
+      Nn(0, g, 0) = Nn(0, i, 0);
+      Pn(0, g, 0) = Pn(0, i, 0);
+      Tn(0, g, 0) = Tn(0, i, 0);
+      Vn(0, g, 0) = 0.0;
+      NVn(0, g, 0) = 0.0;
+
+      const bool crossed = us.face_up[f] >= 0;
+      const BoutReal refl = crossed ? target_energy_refl_factor : sol_energy_refl_factor;
+      const BoutReal fast = crossed ? target_fast_refl_fraction : sol_fast_refl_fraction;
+      const BoutReal nn = Nn(0, i, 0);
+      const BoutReal tn = Tn(0, i, 0);
+      const BoutReal v_th = 0.25 * sqrt(8 * tn / (PI * AA)); // Stangeby eqns. 2.21, 2.24
+      const BoutReal q = 2 * nn * tn * v_th                   // Incident energy
+                         - (refl * fast) * 2 * nn * tn * v_th // Fast reflected energy
+                         - (1 - fast) * T_FC * nn * v_th;     // Thermal reflected energy
+      const BoutReal area = (crossed and us_projected_area) ? std::abs(us.flux_over_B[f])
+                                                            : us.face_area[f];
+      const BoutReal cooling_source = q * area / us.vol[c];
+      energy_source(0, i, 0) -= cooling_source;
+      (crossed ? target_energy_source : wall_energy_source)(0, i, 0) -= cooling_source;
+    }
+    setBoundary(species["density"], fromFieldAligned(Nn));
+    setBoundary(species["temperature"], fromFieldAligned(Tn));
+    setBoundary(species["pressure"], fromFieldAligned(Pn));
+    if (IS_SET_NOBOUNDARY(species["velocity"])) {
+      setBoundary(species["velocity"], fromFieldAligned(Vn));
+    }
+    if (IS_SET_NOBOUNDARY(species["momentum"])) {
+      setBoundary(species["momentum"], fromFieldAligned(NVn));
+    }
+    set(species["energy_source"], fromFieldAligned(energy_source));
+    return;
+  }
 
   // Targets
   if (lower_y) {

@@ -1,4 +1,5 @@
 
+#include "../include/unstructured.hxx"
 #include <bout/bout_types.hxx>
 #include <bout/boutexception.hxx>
 #include <bout/constants.hxx>
@@ -41,6 +42,15 @@ EvolveDensity::EvolveDensity(std::string name, Options& alloptions, Solver* solv
       options["poloidal_flows"].doc("Include poloidal ExB flow").withDefault<bool>(true);
 
   density_floor = options["density_floor"].doc("Minimum density floor").withDefault(1e-7);
+
+  if (options.isSet("core_density")) {
+    us_core_density =
+        options["core_density"]
+            .doc("Unstructured grids: density held at the core boundary [m^-3]. "
+                 "Zero gradient if not set")
+            .as<BoutReal>()
+        / get<BoutReal>(alloptions["units"]["inv_meters_cubed"]);
+  }
 
   const BoutReal temperature_floor =
       options["temperature_floor"]
@@ -218,6 +228,10 @@ void EvolveDensity::transform_impl(GuardedOptions& state) {
     ASSERT2(N.hasParallelSlices());
   }
   auto species = state["species"][name];
+  if (Unstructured::active()) {
+    // Ghost cells: fixed value on the core boundary if given, otherwise zero gradient
+    Unstructured::get().setGhosts(N, us_core_density);
+  }
   Field3DParallel floored_N = floor(N, 0.0);
   set(species["density"], floored_N); // Density in state always >= 0
   set(species["AA"], AA);             // Atomic mass
@@ -287,8 +301,13 @@ void EvolveDensity::finally(const Options& state) {
       fastest_wave = sqrt(T / AA);
     }
 
-    ddt(N) -= FV::Div_par_mod<hermes::Limiter>(N, V, fastest_wave, flow_ylow, true,
-                                               dissipative);
+    if (Unstructured::active()) {
+      ddt(N) -= Unstructured::get().Div_par_mod(N, V, fastest_wave);
+      flow_ylow = 0.0;
+    } else {
+      ddt(N) -= FV::Div_par_mod<hermes::Limiter>(N, V, fastest_wave, flow_ylow, true,
+                                                 dissipative);
+    }
 
     if (state.isSection("fields") and state["fields"].isSet("Apar_flutter")) {
       // Magnetic flutter term
@@ -329,6 +348,11 @@ void EvolveDensity::finally(const Options& state) {
   // Scale time derivatives
   if (state.isSet("scale_timederivs")) {
     ddt(N) *= get<Field3D>(state["scale_timederivs"]);
+  }
+
+  if (Unstructured::active()) {
+    // Ghost cells are set by boundary conditions, not evolved
+    Unstructured::get().zeroGhosts(ddt(N));
   }
 
   if (evolve_log) {

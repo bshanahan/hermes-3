@@ -1,4 +1,5 @@
 
+#include "../include/unstructured.hxx"
 #include <bout/difops.hxx>
 #include <bout/field3d.hxx>
 #include <bout/mesh.hxx>
@@ -23,7 +24,8 @@ void ElectronForceBalance::transform_impl(GuardedOptions& state) {
   ASSERT1(get<BoutReal>(electrons["charge"]) == -1.0);
 
   // Force balance, E = (-∇p + F) / n
-  Field3D force_density = -Grad_par(Pe);
+  Field3D force_density =
+      Unstructured::active() ? -Unstructured::get().Grad_par(Pe) : -Grad_par(Pe);
 
   if (IS_SET(electrons["momentum_source"])) {
     // Balance other forces from e.g. collisions

@@ -2,6 +2,7 @@
 #ifndef EVOLVE_PRESSURE_H
 #define EVOLVE_PRESSURE_H
 
+#include <optional>
 #include "../include/hermes_utils.hxx"
 #include "component.hxx"
 #include <bout/field3d.hxx>
@@ -78,6 +79,7 @@ private:
   Field3D logP;    ///< Natural logarithm of P
 
   BoutReal density_floor;     ///< Minimum density for calculating T
+  std::optional<BoutReal> us_core_temperature; ///< Unstructured grids: core boundary value
   bool low_n_diffuse_perp;    ///< Cross-field diffusion at low density?
   BoutReal temperature_floor; ///< Low temperature scale for low_T_diffuse_perp
   bool low_T_diffuse_perp;    ///< Add cross-field diffusion at low temperature?

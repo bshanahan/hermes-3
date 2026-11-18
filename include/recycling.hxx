@@ -61,6 +61,11 @@ private:
 
   std::vector<RecycleChannel> channels; // Recycling channels
 
+  /// Unstructured grids: which local wall faces pump, and whether recycled
+  /// neutrals are launched along the wall normal
+  std::vector<bool> us_pump_face;
+  bool us_wall_normal_launch;
+
   bool target_recycle{false}, sol_recycle{false}, pfr_recycle{false},
       neutral_pump{false}; ///< Flags for enabling recycling in different regions
   bool diagnose;           ///< Save additional post-processing variables?

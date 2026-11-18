@@ -1,4 +1,5 @@
 
+#include "../include/unstructured.hxx"
 #include <bout/assert.hxx>
 #include <bout/bout_types.hxx>
 #include <bout/boutexception.hxx>
@@ -78,7 +79,7 @@ NeutralMixed::NeutralMixed(const std::string& name, Options& alloptions, Solver*
   const BoutReal Cs0 = sqrt(SI::qe * Tnorm / SI::Mp);
 
   // Need to take derivatives in X for cross-field diffusion terms
-  ASSERT0(mesh->xstart > 0);
+  ASSERT0(mesh->xstart > 0 or Unstructured::present(mesh));
 
   auto& options = alloptions[name];
 
@@ -505,6 +506,22 @@ void NeutralMixed::transform_impl(GuardedOptions& state) {
     }
   }
 
+  if (Unstructured::active()) {
+    // Ghost cells: zero gradient, and no flow through wall faces
+    const auto& us = Unstructured::get();
+    us.setGhosts(Nn);
+    us.setGhosts(Pn);
+    us.setGhosts(Tn);
+    us.setGhosts(Vn);
+    us.setGhosts(NVn);
+    for (int c = 0; c < us.nlocal; c++) {
+      if (us.kind[c] == Unstructured::wall) {
+        Vn(0, us.ys + c, 0) = 0.0;
+        NVn(0, us.ys + c, 0) = 0.0;
+      }
+    }
+  }
+
   // Set values in the state
   auto localstate = state["species"][name];
   set(localstate["density"], Nn);
@@ -664,6 +681,25 @@ void NeutralMixed::finally(const Options& state) {
   // Take smooth absolute of a gradient and regularise with:
   // Smooth user-set ceiling, which aids robustness in transients.
   // Smooth floor to avoid division by zero.
+  auto regularise_sq = [&](const Field3D& g_sq, BoutReal g_min,
+                           BoutReal g_max) -> Field3D {
+    const BoutReal g_max_sq = SQ(g_max);
+    const Field3D g_ceil = g_sq * g_max_sq / (g_sq + g_max_sq);
+    const Field3D g_reg = sqrt(g_ceil + SQ(g_min));
+    return g_reg;
+  };
+  // Regularised |Grad_perp(f) / scale| and b.Grad(f), on either kind of grid
+  auto perp_gradient_reg = [&](const Field3D& f, const Field3D& scale, BoutReal g_min,
+                               BoutReal g_max) -> Field3D {
+    if (Unstructured::active()) {
+      return regularise_sq(Unstructured::get().gradPerpSq(f) / SQ(scale), g_min, g_max);
+    }
+    const auto g = Grad_perp(f) / scale;
+    return regularise_sq(g * g, g_min, g_max);
+  };
+  auto par_gradient = [&](const Field3D& f) -> Field3D {
+    return Unstructured::active() ? Unstructured::get().Grad_par(f) : Grad_par(f);
+  };
   auto regularise_gradient = [&](const auto& g, BoutReal g_min,
                                  BoutReal g_max) -> Field3D {
     const Field3D g_sq = g * g;
@@ -681,8 +717,8 @@ void NeutralMixed::finally(const Options& state) {
   // the Nn factor enters at the operator through DnnNn.
   if (flux_limit_adv >= 0.0) {
     if (update_limiter_gradient) {
-      grad_reg_adv = regularise_gradient(Grad_perp(logPnlim), limiter_gradient_floor,
-                                         limiter_gradient_ceiling);
+      grad_reg_adv = perp_gradient_reg(logPnlim, Field3D{1.0}, limiter_gradient_floor,
+                                       limiter_gradient_ceiling);
     }
     Dmax = flux_limit_adv * (1. / 4) * vn_bar / grad_reg_adv;
   }
@@ -696,8 +732,8 @@ void NeutralMixed::finally(const Options& state) {
     // perpendicular
     if (flux_limit_cond_perp >= 0.0) {
       if (update_limiter_gradient) {
-        grad_reg_cond_perp = regularise_gradient(
-            Grad_perp(Tn) / Tnlim, limiter_gradient_floor, limiter_gradient_ceiling);
+        grad_reg_cond_perp = perp_gradient_reg(
+            Tn, Tnlim, limiter_gradient_floor, limiter_gradient_ceiling);
       }
       kappa_n_max_perp =
           flux_limit_cond_perp * (1. / 2) * vn_bar * Nnlim / grad_reg_cond_perp;
@@ -709,7 +745,7 @@ void NeutralMixed::finally(const Options& state) {
     if (flux_limit_cond_par >= 0.0) {
       if (update_limiter_gradient) {
         grad_reg_cond_par = regularise_gradient(
-            Grad_par(Tn) / Tnlim, limiter_gradient_floor_par, limiter_gradient_ceiling);
+            par_gradient(Tn) / Tnlim, limiter_gradient_floor_par, limiter_gradient_ceiling);
       }
       kappa_n_max_par =
           flux_limit_cond_par * (1. / 2) * vn_bar * Nnlim / grad_reg_cond_par;
@@ -727,8 +763,8 @@ void NeutralMixed::finally(const Options& state) {
     // perpendicular
     if (flux_limit_visc_perp >= 0.0) {
       if (update_limiter_gradient) {
-        grad_reg_visc_perp = regularise_gradient(
-            Grad_perp(Vn) / vn_bar, limiter_gradient_floor, limiter_gradient_ceiling);
+        grad_reg_visc_perp = perp_gradient_reg(
+            Vn, vn_bar, limiter_gradient_floor, limiter_gradient_ceiling);
       }
       eta_n_max_perp = flux_limit_visc_perp * Pnlim / vn_bar / grad_reg_visc_perp;
     }
@@ -739,7 +775,7 @@ void NeutralMixed::finally(const Options& state) {
     if (flux_limit_visc_par >= 0.0) {
       if (update_limiter_gradient) {
         grad_reg_visc_par = regularise_gradient(
-            Grad_par(Vn) / vn_bar, limiter_gradient_floor_par, limiter_gradient_ceiling);
+            par_gradient(Vn) / vn_bar, limiter_gradient_floor_par, limiter_gradient_ceiling);
       }
       eta_n_max_par = flux_limit_visc_par * Pnlim / vn_bar / grad_reg_visc_par;
     }
@@ -883,138 +919,185 @@ void NeutralMixed::finally(const Options& state) {
 
   /////////////////////////////////////////////////////
   // Neutral density
-  TRACE("Neutral density");
-  ddt(Nn) = -FV::Div_par_mod<ParLimiter>(Nn, Vn, sound_speed,
-                                         pf_adv_par_ylow); // Parallel advection
+  if (Unstructured::active()) {
+    // Flat-cell grid: the same equations, with fluxes through cell faces.
+    // No flow, conduction or viscous stress through wall faces.
+    const auto& us = Unstructured::get();
 
-  // Perpendicular diffusion
-  if (nonorthogonal_operators) {
-    ddt(Nn) +=
-        Div_a_Grad_perp_nonorthog(DnnNn, logPnlim, pf_adv_perp_xlow, pf_adv_perp_ylow);
-  } else {
-    ddt(Nn) += Div_a_Grad_perp_flows(DnnNn, logPnlim, pf_adv_perp_xlow, pf_adv_perp_ylow);
-  }
+    ddt(Nn) = -us.Div_par_mod(Nn, Vn, sound_speed) + us.Div_a_Grad_perp(DnnNn, logPnlim);
+    Sn = density_source;
+    if (localstate.isSet("density_source")) {
+      Sn += get<Field3D>(localstate["density_source"]);
+    }
+    ddt(Nn) += Sn;
 
-  Sn = density_source; // Save for possible output
-  if (localstate.isSet("density_source")) {
-    Sn += get<Field3D>(localstate["density_source"]);
-  }
-  ddt(Nn) += Sn; // Always add density_source
-
-  /////////////////////////////////////////////////////
-  // Neutral pressure
-  TRACE("Neutral pressure");
-
-  ddt(Pn) = -(5. / 3)
-                * FV::Div_par_mod<ParLimiter>( // Parallel advection
-                    Pn, Vn, sound_speed, ef_adv_par_ylow)
-            + (2. / 3) * Vn * Grad_par(Pn); // Work done
-
-  // Perpendicular advection of pressure
-  if (nonorthogonal_operators) {
-    ddt(Pn) +=
-        (5. / 3)
-        * Div_a_Grad_perp_nonorthog(DnnPn, logPnlim, ef_adv_perp_xlow, ef_adv_perp_ylow);
-  } else {
-    ddt(Pn) +=
-        (5. / 3)
-        * Div_a_Grad_perp_flows(DnnPn, logPnlim, ef_adv_perp_xlow, ef_adv_perp_ylow);
-  }
-
-  // The factor here is 5/2 as we're advecting internal energy and pressure.
-  ef_adv_par_ylow *= 5. / 2;
-  ef_adv_perp_xlow *= 5. / 2;
-  ef_adv_perp_ylow *= 5. / 2;
-
-  if (neutral_conduction) {
-    ddt(Pn) += (2. / 3)
-               * Div_par_K_Grad_par_mod(kappa_n_par, Tn, // Parallel conduction
-                                        ef_cond_par_ylow,
-                                        false, // No conduction through target boundary
-                                        conduction_method);
-
-    // Perpendicular conduction
-    if (nonorthogonal_operators) {
+    ddt(Pn) = -(5. / 3) * us.Div_par_mod(Pn, Vn, sound_speed)
+              + (2. / 3) * Vn * us.Grad_par(Pn)
+              + (5. / 3) * us.Div_a_Grad_perp(DnnPn, logPnlim);
+    if (neutral_conduction) {
       ddt(Pn) += (2. / 3)
-                 * Div_a_Grad_perp_nonorthog(kappa_n_perp, Tn, ef_cond_perp_xlow,
-                                             ef_cond_perp_ylow);
+                 * (us.Div_par_K_Grad_par(kappa_n_par, Tn)
+                    + us.Div_a_Grad_perp(kappa_n_perp, Tn));
+    }
+    Sp = pressure_source;
+    if (localstate.isSet("energy_source")) {
+      Sp += (2. / 3) * get<Field3D>(localstate["energy_source"]);
+    }
+    ddt(Pn) += Sp;
+
+    if (evolve_momentum) {
+      ddt(NVn) = -AA * us.Div_par_fvv(Nnlim, Vn, sound_speed) - us.Grad_par(Pn)
+                 + us.Div_a_Grad_perp(DnnNVn, logPnlim);
+      if (neutral_viscosity) {
+        const Field3D viscosity_source =
+            us.Div_par_K_Grad_par(eta_n_par, Vn) + us.Div_a_Grad_perp(eta_n_perp, Vn);
+        ddt(NVn) += viscosity_source;
+        ddt(Pn) += -(2. / 3) * Vn * viscosity_source;
+      }
+      Snv = momentum_source;
+      if (localstate.isSet("momentum_source")) {
+        Snv += get<Field3D>(localstate["momentum_source"]);
+      }
+      ddt(NVn) += Snv;
     } else {
-      ddt(Pn) +=
-          (2. / 3)
-          * Div_a_Grad_perp_flows(kappa_n_perp, Tn, ef_cond_perp_xlow, ef_cond_perp_ylow);
+      ddt(NVn) = 0;
+      Snv = 0;
+    }
+  } else {
+    TRACE("Neutral density");
+    ddt(Nn) = -FV::Div_par_mod<ParLimiter>(Nn, Vn, sound_speed,
+                                           pf_adv_par_ylow); // Parallel advection
+
+    // Perpendicular diffusion
+    if (nonorthogonal_operators) {
+      ddt(Nn) +=
+          Div_a_Grad_perp_nonorthog(DnnNn, logPnlim, pf_adv_perp_xlow, pf_adv_perp_ylow);
+    } else {
+      ddt(Nn) += Div_a_Grad_perp_flows(DnnNn, logPnlim, pf_adv_perp_xlow, pf_adv_perp_ylow);
     }
 
-    // The factor here is likely 3/2 as this is pure energy flow, but needs checking.
-    ef_cond_perp_xlow *= 3. / 2;
-    ef_cond_perp_ylow *= 3. / 2;
-    ef_cond_par_ylow *= 3. / 2;
-  }
-
-  Sp = pressure_source;
-  if (localstate.isSet("energy_source")) {
-    Sp += (2. / 3) * get<Field3D>(localstate["energy_source"]);
-  }
-  ddt(Pn) += Sp;
-
-  if (evolve_momentum) {
+    Sn = density_source; // Save for possible output
+    if (localstate.isSet("density_source")) {
+      Sn += get<Field3D>(localstate["density_source"]);
+    }
+    ddt(Nn) += Sn; // Always add density_source
 
     /////////////////////////////////////////////////////
-    // Neutral momentum
-    TRACE("Neutral momentum");
+    // Neutral pressure
+    TRACE("Neutral pressure");
 
-    ddt(NVn) = -AA
-                   * FV::Div_par_fvv<ParLimiter>( // Momentum flow
-                       Nnlim, Vn, sound_speed)
+    ddt(Pn) = -(5. / 3)
+                  * FV::Div_par_mod<ParLimiter>( // Parallel advection
+                      Pn, Vn, sound_speed, ef_adv_par_ylow)
+              + (2. / 3) * Vn * Grad_par(Pn); // Work done
 
-               - Grad_par(Pn); // Pressure gradient
-
-    // Perpendicular advection of momentum
+    // Perpendicular advection of pressure
     if (nonorthogonal_operators) {
-      ddt(NVn) +=
-          Div_a_Grad_perp_nonorthog(DnnNVn, logPnlim, mf_adv_perp_xlow, mf_adv_perp_ylow);
+      ddt(Pn) +=
+          (5. / 3)
+          * Div_a_Grad_perp_nonorthog(DnnPn, logPnlim, ef_adv_perp_xlow, ef_adv_perp_ylow);
     } else {
-      ddt(NVn) +=
-          Div_a_Grad_perp_flows(DnnNVn, logPnlim, mf_adv_perp_xlow, mf_adv_perp_ylow);
+      ddt(Pn) +=
+          (5. / 3)
+          * Div_a_Grad_perp_flows(DnnPn, logPnlim, ef_adv_perp_xlow, ef_adv_perp_ylow);
     }
 
-    if (neutral_viscosity) {
-      // NOTE: The following viscosity terms are not (yet) balanced
-      //       by a viscous heating term
-      // Relationship between heat conduction and viscosity for neutral
-      // gas Chapman, Cowling "The Mathematical Theory of Non-Uniform
-      // Gases", CUP 1952 Ferziger, Kaper "Mathematical Theory of
-      // Transport Processes in Gases", 1972
-      // eta_n = (2. / 5) * kappa_n;
+    // The factor here is 5/2 as we're advecting internal energy and pressure.
+    ef_adv_par_ylow *= 5. / 2;
+    ef_adv_perp_xlow *= 5. / 2;
+    ef_adv_perp_ylow *= 5. / 2;
 
-      Field3D viscosity_source = Div_par_K_Grad_par_mod( // Parallel viscosity
-          eta_n_par, Vn, mf_visc_par_ylow,
-          false, // No viscosity through target boundary
-          conduction_method);
+    if (neutral_conduction) {
+      ddt(Pn) += (2. / 3)
+                 * Div_par_K_Grad_par_mod(kappa_n_par, Tn, // Parallel conduction
+                                          ef_cond_par_ylow,
+                                          false, // No conduction through target boundary
+                                          conduction_method);
 
-      // Perpendicular viscosity
+      // Perpendicular conduction
       if (nonorthogonal_operators) {
-        viscosity_source += Div_a_Grad_perp_nonorthog(eta_n_perp, Vn, mf_visc_perp_xlow,
-                                                      mf_visc_perp_ylow);
+        ddt(Pn) += (2. / 3)
+                   * Div_a_Grad_perp_nonorthog(kappa_n_perp, Tn, ef_cond_perp_xlow,
+                                               ef_cond_perp_ylow);
       } else {
-        viscosity_source +=
-            Div_a_Grad_perp_flows(eta_n_perp, Vn, mf_visc_perp_xlow, mf_visc_perp_ylow);
+        ddt(Pn) +=
+            (2. / 3)
+            * Div_a_Grad_perp_flows(kappa_n_perp, Tn, ef_cond_perp_xlow, ef_cond_perp_ylow);
       }
 
-      ddt(NVn) += viscosity_source;
-      ddt(Pn) += -(2. / 3) * Vn * viscosity_source;
+      // The factor here is likely 3/2 as this is pure energy flow, but needs checking.
+      ef_cond_perp_xlow *= 3. / 2;
+      ef_cond_perp_ylow *= 3. / 2;
+      ef_cond_par_ylow *= 3. / 2;
     }
-    Snv = momentum_source;
-    if (localstate.isSet("momentum_source")) {
-      Snv += get<Field3D>(localstate["momentum_source"]);
-    }
-    ddt(NVn) += Snv;
 
-  } else {
-    ddt(NVn) = 0;
-    Snv = 0;
+    Sp = pressure_source;
+    if (localstate.isSet("energy_source")) {
+      Sp += (2. / 3) * get<Field3D>(localstate["energy_source"]);
+    }
+    ddt(Pn) += Sp;
+
+    if (evolve_momentum) {
+
+      /////////////////////////////////////////////////////
+      // Neutral momentum
+      TRACE("Neutral momentum");
+
+      ddt(NVn) = -AA
+                     * FV::Div_par_fvv<ParLimiter>( // Momentum flow
+                         Nnlim, Vn, sound_speed)
+
+                 - Grad_par(Pn); // Pressure gradient
+
+      // Perpendicular advection of momentum
+      if (nonorthogonal_operators) {
+        ddt(NVn) +=
+            Div_a_Grad_perp_nonorthog(DnnNVn, logPnlim, mf_adv_perp_xlow, mf_adv_perp_ylow);
+      } else {
+        ddt(NVn) +=
+            Div_a_Grad_perp_flows(DnnNVn, logPnlim, mf_adv_perp_xlow, mf_adv_perp_ylow);
+      }
+
+      if (neutral_viscosity) {
+        // NOTE: The following viscosity terms are not (yet) balanced
+        //       by a viscous heating term
+        // Relationship between heat conduction and viscosity for neutral
+        // gas Chapman, Cowling "The Mathematical Theory of Non-Uniform
+        // Gases", CUP 1952 Ferziger, Kaper "Mathematical Theory of
+        // Transport Processes in Gases", 1972
+        // eta_n = (2. / 5) * kappa_n;
+
+        Field3D viscosity_source = Div_par_K_Grad_par_mod( // Parallel viscosity
+            eta_n_par, Vn, mf_visc_par_ylow,
+            false, // No viscosity through target boundary
+            conduction_method);
+
+        // Perpendicular viscosity
+        if (nonorthogonal_operators) {
+          viscosity_source += Div_a_Grad_perp_nonorthog(eta_n_perp, Vn, mf_visc_perp_xlow,
+                                                        mf_visc_perp_ylow);
+        } else {
+          viscosity_source +=
+              Div_a_Grad_perp_flows(eta_n_perp, Vn, mf_visc_perp_xlow, mf_visc_perp_ylow);
+        }
+
+        ddt(NVn) += viscosity_source;
+        ddt(Pn) += -(2. / 3) * Vn * viscosity_source;
+      }
+      Snv = momentum_source;
+      if (localstate.isSet("momentum_source")) {
+        Snv += get<Field3D>(localstate["momentum_source"]);
+      }
+      ddt(NVn) += Snv;
+
+    } else {
+      ddt(NVn) = 0;
+      Snv = 0;
+    }
+
+    // Scale time derivatives
   }
 
-  // Scale time derivatives
   if (state.isSet("scale_timederivs")) {
     Field3D scale_timederivs = get<Field3D>(state["scale_timederivs"]);
     ddt(Nn) *= scale_timederivs;
@@ -1022,6 +1105,9 @@ void NeutralMixed::finally(const Options& state) {
     ddt(NVn) *= scale_timederivs;
   }
 
+  if (freeze_low_density and Unstructured::active()) {
+    throw BoutException("freeze_low_density is not available on unstructured grids");
+  }
   if (freeze_low_density) {
     // Apply a factor to time derivatives in low density regions.
     // Keep the sources and sinks, so that temperature and flow
@@ -1055,6 +1141,14 @@ void NeutralMixed::finally(const Options& state) {
       ddt(Pn)[i] = factor * ddt(Pn)[i] + (1. - factor) * Pn_s[i];
       ddt(NVn)[i] = factor * ddt(NVn)[i] + (1. - factor) * NVn_s[i];
     }
+  }
+
+  if (Unstructured::active()) {
+    // Ghost cells are set by boundary conditions, not evolved
+    const auto& us = Unstructured::get();
+    us.zeroGhosts(ddt(Nn));
+    us.zeroGhosts(ddt(Pn));
+    us.zeroGhosts(ddt(NVn));
   }
 
 #if CHECKLEVEL >= 1

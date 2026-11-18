@@ -1,4 +1,5 @@
 
+#include "../include/unstructured.hxx"
 #include "../include/recycling.hxx"
 #include "../include/hermes_utils.hxx" // For indexAt
 
@@ -190,7 +191,34 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
       "from", std::vector<std::string>(from_species.begin(), from_species.end()));
   substitutePermissions("to_inputs", {"AA", "density", "pressure", "temperature"});
   substitutePermissions("from_inputs", {"density", "velocity", "temperature"});
-  substitutePermissions("outputs", {"density_source", "energy_source"});
+  us_wall_normal_launch = false;
+  if (Unstructured::active()) {
+    const auto& us = Unstructured::get();
+    us_wall_normal_launch =
+        options["wall_normal_launch"]
+            .doc("Unstructured grids: give recycled neutrals momentum along the wall "
+                 "normal? Only its component along the magnetic field is used")
+            .withDefault<bool>(true);
+    us_pump_face.assign(us.nfaces, false);
+    const auto pump_faces = us.wallFacesInBoxes(
+        options["pump_boxes"]
+            .doc("Unstructured grids: wall faces that pump, as boxes "
+                 "'Rmin, Rmax, Zmin, Zmax | ...' in metres")
+            .withDefault<std::string>(""));
+    BoutReal pump_area = 0.0;
+    for (const int f : pump_faces) {
+      us_pump_face[f] = true;
+      pump_area += TWOPI * us.face_area[f] * SQ(us.length_norm);
+    }
+    output.write("\trecycling: {} pump faces on this processor, {:.4f} m^2\n",
+                 pump_faces.size(), pump_area);
+  }
+  if (us_wall_normal_launch) {
+    substitutePermissions("outputs",
+                          {"density_source", "energy_source", "momentum_source"});
+  } else {
+    substitutePermissions("outputs", {"density_source", "energy_source"});
+  }
 }
 
 void Recycling::transform_impl(GuardedOptions& state) {
@@ -229,8 +257,75 @@ void Recycling::transform_impl(GuardedOptions& state) {
                         ? getNonFinal<Field3D>(species_to["energy_source"])
                         : 0.0;
 
-    channel.pump_density_source = 0;
-    channel.pump_energy_source = 0;
+    channel.pump_density_source = 0.0;
+    channel.pump_energy_source = 0.0;
+    channel.pump_density_source.allocate();
+    channel.pump_energy_source.allocate();
+
+    if (Unstructured::active()) {
+      // Flat-cell grid: every wall face recycles the ion flow that reaches it
+      // through the sheath. The ghost cell holds the sheath-edge values.
+      // Faces inside the pump boxes return only the pump fraction, and also
+      // absorb the neutrals that reach them.
+      const auto& us = Unstructured::get();
+      if (channel.target_fast_recycle_fraction > 0.0) {
+        throw BoutException("Fast recycling is not available on unstructured grids");
+      }
+      density_source.allocate();
+      energy_source.allocate();
+      Field3D momentum_source = zeroFrom(density_source);
+      momentum_source.allocate();
+      channel.target_recycle_density_source = 0.0;
+      channel.target_recycle_energy_source = 0.0;
+      // Mean wall-normal speed of a cosine distribution at the recycling energy
+      const BoutReal launch_speed = (2. / 3) * sqrt(2. * channel.target_energy / AAn);
+      if (target_recycle) {
+        for (int f = 0; f < us.nfaces; f++) {
+          if (us.face_kind[f] != Unstructured::wall) {
+            continue;
+          }
+          const int c = us.faceL[f];
+          const int i = us.ys + c;
+          const int g = us.ys + us.faceR[f];
+          const bool pump = neutral_pump and us_pump_face[f];
+          const BoutReal multiplier =
+              pump ? channel.pump_multiplier : channel.target_multiplier;
+          // Ion flow out of the domain through this face
+          const BoutReal flow =
+              std::max(N(0, g, 0) * V(0, g, 0) * us.flux_over_B[f], 0.0);
+          const BoutReal particle_source = multiplier * flow / us.vol[c];
+          const BoutReal heat_source = particle_source * channel.target_energy;
+          channel.target_recycle_density_source(0, i, 0) += particle_source;
+          channel.target_recycle_energy_source(0, i, 0) += heat_source;
+          density_source(0, i, 0) += particle_source;
+          energy_source(0, i, 0) += heat_source;
+          if (us_wall_normal_launch) {
+            // b . (normal into the plasma) = -flux / (B * area)
+            momentum_source(0, i, 0) -= AAn * particle_source * launch_speed
+                                        * us.flux_over_B[f] / us.face_area[f];
+          }
+          if (pump) {
+            // Neutrals reaching the pump: one-way thermal flux on the surface
+            const BoutReal nn = Nnlim(0, i, 0);
+            const BoutReal tn = Tnlim(0, i, 0);
+            const BoutReal v_th = 0.25 * sqrt(8 * tn / (PI * AAn));
+            const BoutReal particle_sink =
+                v_th * nn * us.face_area[f] / us.vol[c] * (1 - multiplier);
+            const BoutReal energy_sink = 2.0 * tn * particle_sink;
+            channel.pump_density_source(0, i, 0) -= particle_sink;
+            channel.pump_energy_source(0, i, 0) -= energy_sink;
+            density_source(0, i, 0) -= particle_sink;
+            energy_source(0, i, 0) -= energy_sink;
+          }
+        }
+      }
+      set<Field3D>(species_to["density_source"], density_source);
+      set<Field3D>(species_to["energy_source"], energy_source);
+      if (us_wall_normal_launch) {
+        add(species_to["momentum_source"], momentum_source);
+      }
+      continue;
+    }
 
     // Recycling at the divertor target plates
     if (target_recycle) {

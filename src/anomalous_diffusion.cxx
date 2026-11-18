@@ -1,3 +1,4 @@
+#include "../include/unstructured.hxx"
 #include "../include/anomalous_diffusion.hxx"
 
 #include "../include/div_ops.hxx"
@@ -58,6 +59,11 @@ AnomalousDiffusion::AnomalousDiffusion(std::string name, Options& alloptions, So
                                 .withDefault<bool>(false);
   }
 
+  us_radial_only = alloptions[name]["us_radial_only"]
+                       .doc("Unstructured grids: diffuse only across flux surfaces, "
+                            "leaving out the poloidal part of Grad_perp?")
+                       .withDefault<bool>(false);
+
   diagnose = alloptions[name]["diagnose"]
                  .doc("Output additional diagnostics?")
                  .withDefault<bool>(false);
@@ -96,6 +102,38 @@ void AnomalousDiffusion::transform_impl(GuardedOptions& state) {
   // Note: Includes diffusion in Y, so set boundary fluxes
   // to zero by imposing neumann boundary conditions.
   const Field3D N = GET_NOBOUNDARY(Field3D, species["density"]);
+
+  if (Unstructured::active()) {
+    // Diffusion through the faces of the flat-cell grid.
+    // Core boundary values are in the ghost cells; no flux through walls.
+    // Like the structured operator this includes the poloidal part of
+    // Grad_perp, unless us_radial_only is set.
+    const auto& us = Unstructured::get();
+    const bool iso = !us_radial_only;
+    const Field3D T3 = species.isSet("temperature")
+                           ? GET_NOBOUNDARY(Field3D, species["temperature"])
+                           : 0.0;
+    const Field3D V3 = species.isSet("velocity")
+                           ? GET_NOBOUNDARY(Field3D, species["velocity"])
+                           : 0.0;
+    if (include_D) {
+      const Field3D D{anomalous_D};
+      add(species["density_source"], us.Div_a_Grad_perp_upwind(D, N, iso));
+      const BoutReal AA = get<BoutReal>(species["AA"]);
+      add(species["momentum_source"], us.Div_a_Grad_perp_upwind(AA * V3 * D, N, iso));
+      add(species["energy_source"], us.Div_a_Grad_perp_upwind((3. / 2) * T3 * D, N, iso));
+    }
+    if (include_chi) {
+      add(species["energy_source"],
+          us.Div_a_Grad_perp_upwind(Field3D{anomalous_chi} * N, T3, iso));
+    }
+    if (include_nu) {
+      const BoutReal AA = get<BoutReal>(species["AA"]);
+      add(species["momentum_source"],
+          us.Div_a_Grad_perp_upwind(Field3D{anomalous_nu} * AA * N, V3, iso));
+    }
+    return;
+  }
 
   // Not averaging when in Fci
   Field2D N2D = N.isFci() ? Field2D{} : DC(N);

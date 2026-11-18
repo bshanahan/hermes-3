@@ -2,6 +2,8 @@
 #ifndef INTEGRATE_H
 #define INTEGRATE_H
 
+#include <tuple>
+#include "unstructured.hxx"
 #include <bout/bout_types.hxx>
 #include <bout/coordinates.hxx>
 #include <bout/field3d.hxx>
@@ -76,6 +78,31 @@ auto cellAverage(Function func, const RegionType& region) {
 
     // Get the coordinate Jacobian
     auto J = result.getCoordinates()->J();
+    if (Unstructured::active()) {
+      // Flat-cell grid: neighbours along the flux tube rather than in y, and
+      // possibly on another processor, so collect the fields first.
+      // J is the cell volume there, so use equal weights.
+      const auto& us = Unstructured::get();
+      const auto buffers = std::make_tuple(us.gather(args)...);
+      BOUT_FOR(i, region) {
+        const int c = i.y() - us.ys;
+        const auto left = [&](const Unstructured::Buffer& b) {
+          const auto [fm, fp] = us.tubeValues(b, c);
+          return cellLeft<CellEdges>(b[c], fm, fp);
+        };
+        const auto right = [&](const Unstructured::Buffer& b) {
+          const auto [fm, fp] = us.tubeValues(b, c);
+          return cellRight<CellEdges>(b[c], fm, fp);
+        };
+        result[i] = std::apply(
+            [&](const auto&... b) {
+              return 4. / 6 * func((b[c])...) + 1. / 6 * func(left(b)...)
+                     + 1. / 6 * func(right(b)...);
+            },
+            buffers);
+      }
+      return result;
+    }
     BOUT_FOR(i, region) {
       // Offset indices
       auto yp = i.yp();

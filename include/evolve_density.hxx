@@ -2,6 +2,7 @@
 #ifndef EVOLVE_DENSITY_H
 #define EVOLVE_DENSITY_H
 
+#include <optional>
 #include "component.hxx"
 
 /// Evolve species density in time
@@ -66,6 +67,7 @@ private:
   bool neumann_boundary_average_z; ///< Apply neumann boundary with Z average?
 
   BoutReal density_floor;
+  std::optional<BoutReal> us_core_density; ///< Unstructured grids: core boundary value
   bool low_n_diffuse;      ///< Parallel diffusion at low density
   bool low_n_diffuse_perp; ///< Perpendicular diffusion at low density
   BoutReal pressure_floor; ///< When non-zero pressure is needed

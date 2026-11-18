@@ -20,6 +20,7 @@
 
 */
 
+#include "include/unstructured.hxx"
 #include "hermes-3.hxx"
 #include "revision.hxx"
 
@@ -71,6 +72,8 @@
 #include "include/sheath_boundary_fci.hxx"
 #include "include/sheath_boundary_insulating.hxx"
 #include "include/sheath_boundary_simple.hxx"
+#include "include/sheath_boundary_unstructured.hxx"
+#include "include/wall_puff.hxx"
 #include "include/sheath_closure.hxx"
 #include "include/simple_conduction.hxx"
 #include "include/simple_pump.hxx"
@@ -258,12 +261,19 @@ int Hermes::init(bool restarting) {
           "If the default identity metric is intended then set e.g. mesh:J=1\n");
     }
 
+    // Note: A flat-cell (unstructured) grid file has a placeholder metric,
+    //       and normalises its own geometry
     if (options["normalise_metric"]
             .doc("Normalise input metric tensor? (assumes input is in SI units)")
-            .withDefault<bool>(true)) {
+            .withDefault<bool>(true)
+        and not Unstructured::present(mesh)) {
       mesh->getCoordinates()->normaliseMetric(
           bout::TokamakOrFCIMetricNormaliser(mesh, Bnorm, rho_s0));
     }
+  }
+
+  if (Unstructured::present(mesh)) {
+    Unstructured::initialise(mesh, rho_s0, Bnorm);
   }
 
   // Tell the components if they are restarting

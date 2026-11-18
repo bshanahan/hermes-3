@@ -1,4 +1,5 @@
 
+#include "../include/unstructured.hxx"
 #include <bout/bout_types.hxx>
 #include <bout/boutexception.hxx>
 #include <bout/constants.hxx>
@@ -106,6 +107,10 @@ void EvolveMomentum::transform_impl(GuardedOptions& state) {
 
   V = Field3DParallel(NV / (AA * Nlim));
   V.applyBoundary();
+  if (Unstructured::active()) {
+    // Zero-gradient ghost cells. Walls are then set by the sheath boundary
+    Unstructured::get().setGhosts(V);
+  }
 
   if (NV.isFci()) {
     ASSERT2(V.hasParallelSlices());
@@ -206,7 +211,10 @@ void EvolveMomentum::finally(const Options& state) {
   //  - Density floor should be consistent with calculation of V
   //    otherwise energy conservation is affected
   //  - using the same operator as in density and pressure equations doesn't work
-  if (use_div_par_fvv) {
+  if (Unstructured::active()) {
+    ddt(NV) -= AA * Unstructured::get().Div_par_fvv(Nlim, V, fastest_wave,
+                                                    fix_momentum_boundary_flux);
+  } else if (use_div_par_fvv) {
     ddt(NV) -= AA
                * FV::Div_par_fvv<hermes::Limiter>(Nlim, V, fastest_wave,
                                                   fix_momentum_boundary_flux);
@@ -220,7 +228,11 @@ void EvolveMomentum::finally(const Options& state) {
     if (NV.isFci()) {
       ASSERT2(P.hasParallelSlices());
     }
-    ddt(NV) -= Grad_par(P.asField3DParallel());
+    if (Unstructured::active()) {
+      ddt(NV) -= Unstructured::get().Grad_par(P);
+    } else {
+      ddt(NV) -= Grad_par(P.asField3DParallel());
+    }
   }
 
   if (state.isSection("fields") and state["fields"].isSet("Apar_flutter")) {
@@ -272,6 +284,11 @@ void EvolveMomentum::finally(const Options& state) {
   // Scale time derivatives
   if (state.isSet("scale_timederivs")) {
     ddt(NV) *= get<Field3D>(state["scale_timederivs"]);
+  }
+
+  if (Unstructured::active()) {
+    // Ghost cells are set by boundary conditions, not evolved
+    Unstructured::get().zeroGhosts(ddt(NV));
   }
 
 #if CHECKLEVEL >= 1

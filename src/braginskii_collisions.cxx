@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <iterator>
 #include <map>
@@ -225,15 +226,22 @@ void BraginskiiCollisions::transform_impl(GuardedOptions& state) {
 
         const Field3D nu_ei = filledFrom(Ne, [&](auto& i) {
           // NRL formulary 2019, page 34
+          // Note: Below 0.1 eV or 1e10 m^-3 the formula is evaluated at that
+          //       limit. Switching to a constant there (as was done before) makes
+          //       the collision frequency jump by ~50% at 0.1 eV, and implicit
+          //       solvers stall on cells that cool through it.
+          const BoutReal Te_lim = std::max(Te[i], 0.1);
+          const BoutReal Ti_lim = std::max(Ti[i], 0.1);
+          const BoutReal Ne_lim = std::max(Ne[i], 1e10);
+          const BoutReal Ni_lim = std::max(Ni[i], 1e10);
           const BoutReal coulomb_log =
-              ((Te[i] < 0.1) || (Ni[i] < 1e10) || (Ne[i] < 1e10)) ? 10
-              : (Te[i] < Ti[i] * me_mi)
-                  ? 23 - 0.5 * log(Ni[i]) + 1.5 * log(Ti[i]) - log(SQ(Zi) * Ai)
-              : (Te[i] < exp(2) * SQ(Zi)) // Fix to ei coulomb log from S.Mijin ReMKiT1D
-                                          // Ti m_e/m_i < Te < 10 Z^2
-                  ? 30.0 - 0.5 * log(Ne[i]) - log(Zi) + 1.5 * log(Te[i])
+              (Te_lim < Ti_lim * me_mi)
+                  ? 23 - 0.5 * log(Ni_lim) + 1.5 * log(Ti_lim) - log(SQ(Zi) * Ai)
+              : (Te_lim < exp(2) * SQ(Zi)) // Fix to ei coulomb log from S.Mijin ReMKiT1D
+                                           // Ti m_e/m_i < Te < 10 Z^2
+                  ? 30.0 - 0.5 * log(Ne_lim) - log(Zi) + 1.5 * log(Te_lim)
                   // Ti m_e/m_i < 10 Z^2 < Te
-                  : 31.0 - 0.5 * log(Ne[i]) + log(Te[i]);
+                  : 31.0 - 0.5 * log(Ne_lim) + log(Te_lim);
 
           // Calculate v_a^2, v_b^2
           const BoutReal vesq = 2 * softFloor(Te[i], 0.1) * SI::qe / SI::Me;

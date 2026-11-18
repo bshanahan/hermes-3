@@ -2,6 +2,8 @@
 #ifndef RATE_HELPER_H
 #define RATE_HELPER_H
 
+#include "unstructured.hxx"
+#include <utility>
 #include <functional>
 #include <variant>
 
@@ -142,6 +144,19 @@ struct RateHelper {
   RateData calc_rates(const RateFuncVariant& rate_calc_func_variant,
                       bool do_averaging = true) {
 
+    // Flat-cell grid: neighbours along flux tubes may be on other processors,
+    // so collect the fields once before looping over cells
+    us_density_buffers.clear();
+    us_param_buffers.clear();
+    if (do_averaging and Unstructured::active()) {
+      for (const auto* dens : this->reactant_densities) {
+        us_density_buffers.push_back(Unstructured::get().gather(*dens));
+      }
+      for (const auto* param : this->rate_params) {
+        us_param_buffers.push_back(Unstructured::get().gather(*param));
+      }
+    }
+
     // Initialize result data structure
     RateData result(reactant_names);
     result.rate = emptyFrom(*this->rate_params[0]);
@@ -211,8 +226,9 @@ struct RateHelper {
             if (do_averaging) {
               // Compute averaged rate, collision frequencies and store in result
               auto Ji = J[i];
-              auto Jm = J.yup()[i.ym()];
-              auto Jp = J.ydown()[i.yp()];
+              // Note: On a flat-cell grid J is the cell volume, so use equal weights
+              auto Jm = Unstructured::active() ? Ji : J.yup()[i.ym()];
+              auto Jp = Unstructured::active() ? Ji : J.ydown()[i.yp()];
 
               result.rate[i] = 4. / 6 * cell_props.rate.centre
                                + (Ji + Jm) / (12. * Ji) * cell_props.rate.left
@@ -338,6 +354,9 @@ private:
     }
   }
 
+  /// Flat-cell grids: reactant densities and rate parameters on all local cells
+  std::vector<Unstructured::Buffer> us_density_buffers, us_param_buffers;
+
   inline void collect_densities(Ind3D i, CellProps& cell_props, bool do_averaging) {
     // Store interpolated densities
     for (std::size_t reactant_idx = 0; reactant_idx < this->num_reactants;
@@ -345,12 +364,15 @@ private:
       auto* dens = this->reactant_densities[reactant_idx];
       cell_props.densities[reactant_idx].centre = (*dens)[i];
       if (do_averaging) {
-        auto ym = i.ym();
-        auto yp = i.yp();
-        cell_props.densities[reactant_idx].left =
-            cellLeft<Limiter>((*dens)[i], (*dens)[ym], (*dens)[yp]);
-        cell_props.densities[reactant_idx].right =
-            cellRight<Limiter>((*dens)[i], (*dens)[ym], (*dens)[yp]);
+        // Neighbours along the field: y neighbours, or flux-tube neighbours
+        // on a flat-cell (unstructured) grid
+        const auto [fm, fp] =
+            Unstructured::active()
+                ? Unstructured::get().tubeValues(us_density_buffers[reactant_idx],
+                                                 i.y() - Unstructured::get().ys)
+                : std::pair<BoutReal, BoutReal>{(*dens)[i.ym()], (*dens)[i.yp()]};
+        cell_props.densities[reactant_idx].left = cellLeft<Limiter>((*dens)[i], fm, fp);
+        cell_props.densities[reactant_idx].right = cellRight<Limiter>((*dens)[i], fm, fp);
       }
     }
   }
@@ -364,14 +386,17 @@ private:
    * @return CellData struct containing centre, left, and right values
    */
   inline DataTriple compute_rate_param(std::size_t idx, Ind3D i, bool do_averaging) {
-    auto ym = i.ym();
-    auto yp = i.yp();
     const auto& field = *this->rate_params[idx];
     DataTriple result;
     result.centre = field[i];
     if (do_averaging) {
-      result.left = cellLeft<Limiter>(field[i], field[ym], field[yp]);
-      result.right = cellRight<Limiter>(field[i], field[ym], field[yp]);
+      const auto [fm, fp] =
+          Unstructured::active()
+              ? Unstructured::get().tubeValues(us_param_buffers[idx],
+                                               i.y() - Unstructured::get().ys)
+              : std::pair<BoutReal, BoutReal>{field[i.ym()], field[i.yp()]};
+      result.left = cellLeft<Limiter>(field[i], fm, fp);
+      result.right = cellRight<Limiter>(field[i], fm, fp);
     }
     return result;
   }

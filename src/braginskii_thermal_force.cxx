@@ -1,3 +1,4 @@
+#include "../include/unstructured.hxx"
 #include <cmath>
 #include <iterator>
 #include <map>
@@ -25,7 +26,8 @@ void BraginskiiThermalForce::transform_impl(GuardedOptions& state) {
     GuardedOptions electrons = allspecies["e"];
     // Need Te boundary to take gradient
     const Field3D Te = GET_VALUE(Field3D, electrons["temperature"]);
-    const Field3D Grad_Te = Grad_par(Te);
+    const Field3D Grad_Te =
+        Unstructured::active() ? Unstructured::get().Grad_par(Te) : Grad_par(Te);
 
     for (auto& kv : allspecies.getChildren()) {
       if (kv.first == "e") {
@@ -137,7 +139,9 @@ void BraginskiiThermalForce::transform_impl(GuardedOptions& state) {
                - 1)
             / (2.6 - 2 * mu + 5.4 * SQ(mu));
 
-        const Field3D heavy_force = nz * beta * Grad_par(Ti);
+        const Field3D heavy_force =
+            nz * beta
+            * (Unstructured::active() ? Unstructured::get().Grad_par(Ti) : Grad_par(Ti));
 
         add((*heavy)["momentum_source"], heavy_force);
         subtract((*light)["momentum_source"], heavy_force);

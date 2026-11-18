@@ -1,4 +1,8 @@
 
+#include <vector>
+#include <cmath>
+#include <bout/boutcomm.hxx>
+#include "../include/unstructured.hxx"
 #include <bout/bout_types.hxx>
 #include <bout/boutexception.hxx>
 #include <bout/constants.hxx>
@@ -40,6 +44,15 @@ EvolvePressure::EvolvePressure(std::string name, Options& alloptions, Solver* so
                    .withDefault<bool>(false);
 
   density_floor = options["density_floor"].doc("Minimum density floor").withDefault(1e-7);
+
+  if (options.isSet("core_temperature")) {
+    us_core_temperature =
+        options["core_temperature"]
+            .doc("Unstructured grids: temperature held at the core boundary [eV]. "
+                 "Zero gradient if not set")
+            .as<BoutReal>()
+        / get<BoutReal>(alloptions["units"]["eV"]);
+  }
 
   low_n_diffuse_perp = options["low_n_diffuse_perp"]
                            .doc("Perpendicular diffusion at low density")
@@ -133,6 +146,44 @@ EvolvePressure::EvolvePressure(std::string name, Options& alloptions, Solver* so
                     + std::string("). Units [Pa/s], note P = 2/3 E"))
                .withDefault(source)
            / (source_normalisation);
+
+  if (Unstructured::active() and options.isSet("core_power")) {
+    // Fixed power into the plasma at the core boundary: a uniform heating
+    // source in the cells next to it. With no core_temperature set the
+    // boundary itself is zero-gradient, so this is the only heat input.
+    const auto& us = Unstructured::get();
+    const BoutReal power =
+        options["core_power"]
+            .doc("Unstructured grids: heating power deposited in the cells next to "
+                 "the core boundary [W]")
+            .as<BoutReal>();
+    std::vector<char> heated(us.nlocal, 0);
+    BoutReal local_volume = 0.0; // Per radian, normalised
+    for (int f = 0; f < us.nfaces; f++) {
+      const int c = us.faceL[f];
+      if (us.face_kind[f] == Unstructured::core and heated[c] == 0) {
+        heated[c] = 1;
+        local_volume += us.vol[c];
+      }
+    }
+    BoutReal volume = 0.0;
+    MPI_Allreduce(&local_volume, &volume, 1, MPI_DOUBLE, MPI_SUM, BoutComm::get());
+    if (volume <= 0.0) {
+      throw BoutException("core_power set for {} but the grid has no core boundary", name);
+    }
+    // [W] -> [W/m^3] -> pressure source [Pa/s], normalised
+    const BoutReal p_source = (2. / 3) * power
+                              / (TWOPI * volume * std::pow(us.length_norm, 3))
+                              / source_normalisation;
+    source.allocate();
+    for (int c = 0; c < us.nlocal; c++) {
+      if (heated[c] != 0) {
+        source(0, us.ys + c, 0) += p_source;
+      }
+    }
+    output.write("\t{}: {:e} W into {:.4f} m^3 next to the core boundary\n", name, power,
+                 TWOPI * volume * std::pow(us.length_norm, 3));
+  }
 
   source_time_dependent = p_options["source_time_dependent"]
                               .doc("Use a time-dependent source?")
@@ -246,6 +297,19 @@ void EvolvePressure::transform_impl(GuardedOptions& state) {
   // Not using density boundary condition
   N = getNoBoundary<Field3D>(species["density"]);
 
+  if (Unstructured::active()) {
+    // Ghost cells: zero gradient, except a fixed temperature on the core boundary
+    const auto& us = Unstructured::get();
+    us.setGhosts(P);
+    if (us_core_temperature) {
+      for (int f = 0; f < us.nfaces; f++) {
+        if (us.face_kind[f] == Unstructured::core) {
+          const int g = us.ys + us.faceR[f];
+          P(0, g, 0) = N(0, g, 0) * (*us_core_temperature);
+        }
+      }
+    }
+  }
   Field3DParallel Pfloor = floor(P, 0.0);
   T = Pfloor / softFloor(N, density_floor);
   Pfloor = N * T; // Ensure consistency
@@ -293,7 +357,14 @@ void EvolvePressure::finally(const Options& state) {
       fastest_wave = sqrt(T / AA);
     }
 
-    if (p_div_v) {
+    if (Unstructured::active()) {
+      // V * Grad(P) form
+      const auto& us = Unstructured::get();
+      ddt(P) -= (5. / 3) * us.Div_par_mod(P, V, fastest_wave);
+      E_VgradP = V * us.Grad_par(P);
+      ddt(P) += (2. / 3) * E_VgradP;
+      flow_ylow_advection = 0.0;
+    } else if (p_div_v) {
       // Use the P * Div(V) form
       ddt(P) -= FV::Div_par_mod<hermes::Limiter>(P, V, fastest_wave, flow_ylow_advection,
                                                  true, dissipative);
@@ -323,7 +394,14 @@ void EvolvePressure::finally(const Options& state) {
       ddt(P) += (2. / 3) * V * bracket(P, Apar_flutter, BRACKET_ARAKAWA);
     }
 
-    if (numerical_viscous_heating || diagnose) {
+    if ((numerical_viscous_heating || diagnose) and Unstructured::active()) {
+      // Not implemented on unstructured grids
+      if (numerical_viscous_heating) {
+        throw BoutException("numerical_viscous_heating is not available on unstructured grids");
+      }
+      Sp_nvh = 0.0;
+      flow_ylow_viscous_heating = 0.0;
+    } else if (numerical_viscous_heating || diagnose) {
       // Viscous heating coming from numerical viscosity from the Lax flux
       const Field3D Nlim = softFloor(N, density_floor);
       const BoutReal AA = get<BoutReal>(species["AA"]); // Atomic mass
@@ -410,6 +488,11 @@ void EvolvePressure::finally(const Options& state) {
   // Scale time derivatives
   if (state.isSet("scale_timederivs")) {
     ddt(P) *= get<Field3D>(state["scale_timederivs"]);
+  }
+
+  if (Unstructured::active()) {
+    // Ghost cells are set by boundary conditions, not evolved
+    Unstructured::get().zeroGhosts(ddt(P));
   }
 
   if (evolve_log) {

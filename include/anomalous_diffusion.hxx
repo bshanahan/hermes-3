@@ -32,6 +32,7 @@ struct AnomalousDiffusion : public NamedComponent<AnomalousDiffusion> {
 private:
   std::string name; ///< Species name
 
+  bool us_radial_only; ///< Unstructured grids: radial diffusion only
   bool diagnose;                           ///< Outputting diagnostics?
   bool include_D, include_chi, include_nu; ///< Which terms should be included?
   Coordinates::FieldMetric anomalous_D;    ///< Anomalous density diffusion coefficient

@@ -1,3 +1,4 @@
+#include "../include/unstructured.hxx"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -285,7 +286,9 @@ void BraginskiiConduction::transform_impl(GuardedOptions& state) {
        */
 
       // Spitzer-Harm heat flux
-      const Field3D q_SH = kappa_par * Grad_par(T);
+      const Field3D q_SH =
+          kappa_par
+          * (Unstructured::active() ? Unstructured::get().Grad_par(T) : Grad_par(T));
       // Free-streaming flux
       const Field3D q_fl = kappa_limit_alpha * N * T * sqrt(T / AA);
 
@@ -325,8 +328,13 @@ void BraginskiiConduction::transform_impl(GuardedOptions& state) {
     // is calculated and removed separately
     set(species["kappa_par"], kappa_par);
 
-    // Petsc can be used to calculate the divergence of the heat flux
-    if (use_petsc_operator) {
+    if (Unstructured::active()) {
+      // No conduction through boundary faces: the sheath sets that heat flux
+      add(species["energy_source"],
+          Unstructured::get().Div_par_K_Grad_par(kappa_par, T));
+      flow_ylow_conduction = zeroFrom(T); // Diagnostic not available
+    } else if (use_petsc_operator) {
+      // Petsc can be used to calculate the divergence of the heat flux
 #if BOUT_HAS_PETSC
       add(species["energy_source"], petsc_parallel.Div_par_K_Grad_par(kappa_par, T));
 #endif
