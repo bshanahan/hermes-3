@@ -1,0 +1,39 @@
+# Cross-field diffusion on a skewed flat-cell (unstructured) annulus.
+# Density is held on the core boundary and lost to the wall with a decay
+# length, so the steady state has a known discrete solution (see runtest).
+nout = 4
+timestep = 95788 * 100     # 95788 = 1 ms
+
+MXG = 0
+MZ = 1
+
+[mesh]
+file = "annulus.grd.nc"
+
+[unstructured]
+skew_correction = true
+skew_limit = 1e12          # no limiting: the problem is then linear
+
+[solver]
+type = pvode
+atol = 1e-12
+rtol = 1e-9
+mxstep = 100000
+
+[hermes]
+components = i
+Nnorm = 1e19
+Bnorm = 1
+Tnorm = 100
+
+[i]
+type = evolve_density, anomalous_diffusion
+AA = 2
+charge = 1
+anomalous_D = 1            # m^2/s
+core_density = 1e19        # m^-3, held at the core boundary
+wall_decay_length = 0.05   # m
+
+[Ni]
+function = 0.5
+bndry_all = neumann

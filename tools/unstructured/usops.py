@@ -17,11 +17,54 @@ def _scatter(g, flow, boundary_into_L_only=True):
     return out
 
 
-def div_a_grad_perp_upwind(g, a, f, isotropic=False):
+def vertex_difference(g, f):
+    """Value at vertex 2 minus value at vertex 1 of every face, from the cell stencils"""
+    ptr = g["face_sptr"]
+    face = np.repeat(np.arange(len(ptr) - 1), np.diff(ptr))
+    out = np.zeros(len(ptr) - 1)
+    np.add.at(out, face, g["face_sw"] * f[g["face_scell"]])
+    return out
+
+
+def face_gradient(g, f, isotropic=False, skew=False, limit=1.0, smooth=0.0):
+    """Transmissibility times the difference of f across every face.
+
+    skew: add the vertex correction, kept below `limit` times the two-point
+    term with the same smooth bound as the C++ (limit=None: no bound).
+    smooth: this fraction of the mean size of f counts as a difference between
+    the two cells when the bound is formed (unstructured:skew_smooth).
+    """
     L, R = g["face_L"], g["face_R"]
-    grad = (g["face_tiso"] if isotropic else g["face_tperp"]) * (f[R] - f[L])
+    trans = g["face_tiso"] if isotropic else g["face_tperp"]
+    two_point = trans * (f[R] - f[L])
+    if not skew:
+        return two_point
+    corr = (g["face_viso"] if isotropic else g["face_vperp"]) * vertex_difference(g, f)
+    if limit is None:
+        return two_point + corr
+    floor_diff = smooth * 0.5 * (np.abs(f[L]) + np.abs(f[R])) * trans
+    bound = limit * np.sqrt(two_point**2 + floor_diff**2)
+    return two_point + corr * bound / np.sqrt(bound**2 + corr**2 + 1e-300)
+
+
+def div_a_grad_perp_upwind(g, a, f, isotropic=False, skew=False, limit=1.0, smooth=0.0):
+    L, R = g["face_L"], g["face_R"]
+    grad = face_gradient(g, f, isotropic, skew, limit, smooth)
     flow_into_L = grad * np.where(grad > 0, a[R], a[L])
     return _scatter(g, flow_into_L)
+
+
+def wall_loss(g, a, f, inv_length):
+    """Loss through wall faces with a decay length; returns the (negative) source"""
+    wall = g["face_kind"] == 2
+    L = g["face_L"]
+    bn_pol = np.minimum(1.0, np.abs(g["face_flux"]) / (g["face_area"] * np.maximum(g["face_Bp"], 1e-30)))
+    out = np.where(wall, a[L] * f[L] * g["face_area"] * np.sqrt(1 - bn_pol**2) * inv_length, 0.0)
+    res = np.zeros(len(g["vol"]))
+    np.add.at(res, L, -out)
+    res /= g["vol"]
+    res[g["nreal"]:] = 0.0
+    return res
 
 
 def div_par_k_grad_par(g, K, f):
@@ -52,10 +95,10 @@ def grad_par(g, f):
     return out
 
 
-def div_a_grad_perp(g, a, f):
+def div_a_grad_perp(g, a, f, skew=False, limit=1.0, smooth=0.0):
     """Div(a Grad_perp f) with the mean coefficient at each face, full grad_perp"""
     L, R = g["face_L"], g["face_R"]
-    flow_into_L = 0.5 * (a[L] + a[R]) * g["face_tiso"] * (f[R] - f[L])
+    flow_into_L = 0.5 * (a[L] + a[R]) * face_gradient(g, f, True, skew, limit, smooth)
     return _scatter(g, flow_into_L)
 
 

@@ -16,6 +16,11 @@ All geometry is in SI units and per radian of toroidal angle:
   us_face_tperp   radial transmissibility:
                   diffusive flow L->R = -D * tperp * (n_R - n_L)       [m]
   us_face_tiso    as tperp, but for all of grad_perp (not only radial) [m]
+  us_face_vperp, us_face_viso
+                  skew correction: the flow gains -D * vperp * (n_v2 - n_v1),
+                  where n_v is the value at a vertex of the face          [m]
+  us_face_sptr, us_face_scell, us_face_sw
+                  (n_v2 - n_v1) as a weighted sum over cells, one CSR row per face
   us_area         poloidal area of the cell                  [m^2]
   us_face_length  poloidal length of the face                [m]
   us_bR, us_bZ    poloidal components of the unit vector along B at the cell
@@ -133,6 +138,22 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
     tperp[face_kind == KIND_WALL] = 0.0
     tiso[face_kind == KIND_WALL] = 0.0
 
+    # Skew correction. The two-point flow above takes the gradient from the two
+    # cell centres only, which is exact when the line joining them is normal to
+    # the face. In general the gradient G in the diamond (L, v1, R, v2) follows
+    # from   G.d = f_R - f_L,   G.t = f_v2 - f_v1   (t = x_v2 - x_v1):
+    #   G = (f_R - f_L) n / dn + (f_v2 - f_v1) beta,   beta = (-d_y, d_x) / (d x t)
+    # so the centre term is unchanged and the vertex term is the correction.
+    det = d[:, 0] * t[:, 1] - d[:, 1] * t[:, 0]
+    beta = np.stack([-d[:, 1], d[:, 0]], 1) / det[:, None]
+    n_r = nrm - bn_pol[:, None] * bpol / np.maximum(Bp, 1e-30)[:, None]   # radial part of n
+    n_iso = nrm - bn[:, None] * bpol / Bf[:, None]                        # n without its parallel part
+    vperp = farea * np.einsum("ij,ij->i", n_r, beta)
+    viso = farea * np.einsum("ij,ij->i", n_iso, beta)
+    vperp[face_kind == KIND_WALL] = 0.0
+    viso[face_kind == KIND_WALL] = 0.0
+    sptr, scell, sw, vertex_kind = _vertex_stencils(P, xc, cells, v1, v2, L, R, face_kind, nreal)
+
     side_L = np.where(R == nxt[np.minimum(L, nreal - 1)], 1, np.where(R == prev[np.minimum(L, nreal - 1)], -1, 0))
     Rr = np.minimum(R, nreal - 1)
     side_R = np.where(R >= nreal, 0, np.where(L == nxt[Rr], 1, np.where(L == prev[Rr], -1, 0)))
@@ -176,17 +197,36 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
             nb[a_].add(b_)
             nb[b_].add(a_)
     rows = []
+    # Real cells in the vertex stencils of the faces of each cell
+    stencil_cells = [set() for _ in range(nreal)]
+    for f in range(nf):
+        st = [int(c) for c in scell[sptr[f]:sptr[f + 1]] if c < nreal]
+        stencil_cells[L[f]].update(st)
+        if R[f] < nreal:
+            stencil_cells[R[f]].update(st)
+    at_vertex = [[] for _ in range(len(vx))]
+    for i, c in enumerate(cells):
+        for v in c:
+            at_vertex[v].append(i)
     for i in range(nreal):
         s = {i} | nb[i]
         for j in nb[i]:
             s |= nb[j]
+        for v in cells[i]:      # the skew correction couples cells that share a vertex
+            s.update(at_vertex[v])
+        s.update(stencil_cells[i])
         for j in (prev[i], nxt[i]):
             if j >= 0:
                 s.add(j)
                 for k in (prev[j], nxt[j]):
                     if k >= 0:
                         s.add(k)
-        rows.append(sorted(s))
+        rows.append({int(j) for j in s})
+    # The wider stencils at wall vertices are one-sided: make the pattern symmetric
+    for i in range(nreal):
+        for j in rows[i]:
+            rows[j].add(i)
+    rows = [sorted(r) for r in rows]
     for g_ in range(nreal, ntot):
         rows.append([g_])
     rowptr = np.concatenate([[0], np.cumsum([len(r) for r in rows])])
@@ -209,12 +249,102 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
         face_L=L, face_R=R, face_flux=flux, face_B=Bf, face_Bp=Bp, face_area=farea, face_dn=dn,
         face_length=length, face_Rmid=mid[:, 0], face_Zmid=mid[:, 1],
         face_kpar=kpar, face_tperp=tperp, face_tiso=tiso, face_kind=face_kind,
+        face_vperp=vperp, face_viso=viso, face_sptr=sptr, face_scell=scell, face_sw=sw,
+        vertex_kind=vertex_kind,
         face_label=np.zeros(nf, int) if face_label is None else np.asarray(face_label, int),
         face_side_L=side_L, face_side_R=side_R, face_up=up,
         face_v1=v1, face_v2=v2, face_nR=nrm[:, 0], face_nZ=nrm[:, 1],
         jac_rowptr=rowptr, jac_cols=cols,
         vertex_R=vx, vertex_Z=vy, cell_vertices=cell_vx,
     )
+
+
+def _vertex_stencils(P, xc, cells, v1, v2, L, R, face_kind, nreal):
+    """Difference of the two vertex values of every face as a weighted sum over cells.
+
+    The value at a vertex is interpolated from cells near it:
+      core vertex       the ghost cells of the core faces that meet there
+                        (they hold the boundary value), weighted by distance
+      other vertices    a weighted least-squares linear fit through the real
+                        cells that share the vertex, which reproduces a linear
+                        function exactly. If those cells do not determine the
+                        fit (fewer than three, or nearly on a line, as happens
+                        at the wall) their face neighbours are added.
+                        Wall ghost cells are not used: not every field keeps
+                        them up to date.
+    Returns CSR arrays (ptr, cell, weight) with one row per face, and the
+    kind of each vertex (0 interior, 1 core, 2 wall).
+    """
+    nv = len(P)
+    around = [[] for _ in range(nv)]
+    for i, c in enumerate(cells):
+        for v in c:
+            around[v].append(i)
+    neighbours = [set() for _ in range(nreal)]
+    for a_, b_ in zip(L, R):
+        if b_ < nreal:
+            neighbours[a_].add(b_)
+            neighbours[b_].add(a_)
+    core_ghosts = [[] for _ in range(nv)]
+    vkind = np.zeros(nv, int)
+    for f in np.flatnonzero(face_kind != KIND_INTERIOR):
+        for v in (v1[f], v2[f]):
+            if face_kind[f] == KIND_CORE:
+                core_ghosts[v].append(R[f])
+                vkind[v] = KIND_CORE
+            elif vkind[v] != KIND_CORE:
+                vkind[v] = KIND_WALL
+
+    def fit(ids, x0):
+        """weights of a weighted least-squares linear fit evaluated at x0, or None"""
+        r = xc[ids] - x0
+        h = np.hypot(*r.T).max()
+        A = np.column_stack([np.ones(len(ids)), r / h])
+        w = 1.0 / np.maximum((r**2).sum(1) / h**2, 1e-12)
+        M = A.T @ (w[:, None] * A)
+        if len(ids) < 3 or np.linalg.cond(M) > 1e6:
+            return None
+        wts = np.linalg.solve(M, A.T * w)[0]
+        return wts if np.abs(wts).max() < 3.0 else None
+
+    weights = []
+    for v in range(nv):
+        if vkind[v] == KIND_CORE:
+            ids = np.array(core_ghosts[v])
+            dist = np.maximum(np.hypot(*(xc[ids] - P[v]).T), 1e-300)
+            weights.append((ids, (1 / dist) / (1 / dist).sum()))
+            continue
+        ids = sorted(around[v])
+        if not ids:
+            weights.append((np.zeros(0, int), np.zeros(0)))
+            continue
+        wts = fit(np.array(ids), P[v])
+        if wts is None:
+            wider = set(ids)
+            for i in ids:
+                wider |= neighbours[i]
+            wide = np.array(sorted(wider))
+            wts = fit(wide, P[v])
+            if wts is not None:
+                ids = wide
+        if wts is None:      # last resort: inverse distance
+            dist = np.maximum(np.hypot(*(xc[np.array(ids)] - P[v]).T), 1e-300)
+            wts = (1 / dist) / (1 / dist).sum()
+            vkind[v] += 10   # marks a vertex without a linear fit
+        weights.append((np.array(ids), wts))
+    ptr, cell, sw = [0], [], []
+    for f in range(len(v1)):
+        row = {}
+        if face_kind[f] != KIND_WALL:
+            for v, sign in ((v2[f], 1.0), (v1[f], -1.0)):
+                for i, w in zip(*weights[v]):
+                    row[int(i)] = row.get(int(i), 0.0) + sign * w
+        for i in sorted(row):
+            if abs(row[i]) > 1e-14:
+                cell.append(i)
+                sw.append(row[i])
+        ptr.append(len(cell))
+    return np.array(ptr), np.array(cell, int), np.array(sw), vkind
 
 
 def check(g, verbose=True, strict=True):
@@ -329,7 +459,7 @@ def layout(g, blocks=48, order="angle"):
 # Value given to padding cells
 _PAD = {"vol": 1.0, "area": 1.0, "B": 1.0, "kind": KIND_PADDING, "prev": -1, "next": -1, "tube": -1}
 # Arrays whose values are cell indices
-_CELL_INDEX = ("prev", "next", "face_L", "face_R", "face_up")
+_CELL_INDEX = ("prev", "next", "face_L", "face_R", "face_up", "face_scell")
 
 
 def write(g, path, extra=None, blocks=48, order="angle"):
@@ -411,6 +541,20 @@ def write(g, path, extra=None, blocks=48, order="angle"):
         for name in ("L", "R", "kind", "label", "side_L", "side_R", "up", "v1", "v2"):
             v = d.createVariable("us_face_" + name, "i4", ("us_face",))
             v[:] = remap(g["face_" + name]) if "face_" + name in _CELL_INDEX else g["face_" + name]
+        if "face_sptr" in g:
+            d.createDimension("us_faceptr", g["nfaces"] + 1)
+            d.createDimension("us_stencil", len(g["face_scell"]))
+            for name in ("vperp", "viso"):
+                v = d.createVariable("us_face_" + name, "f8", ("us_face",))
+                v[:] = g["face_" + name]
+            v = d.createVariable("us_face_sptr", "i4", ("us_faceptr",))
+            v[:] = g["face_sptr"]
+            v = d.createVariable("us_face_scell", "i4", ("us_stencil",))
+            v[:] = remap(g["face_scell"])
+            v = d.createVariable("us_face_sw", "f8", ("us_stencil",))
+            v[:] = g["face_sw"]
+            v = d.createVariable("us_vertex_kind", "i4", ("us_vertex",))
+            v[:] = g["vertex_kind"]
         v = d.createVariable("us_jac_rowptr", "i4", ("us_jacrow",))
         v[:] = rowptr
         v = d.createVariable("us_jac_cols", "i4", ("us_jac",))

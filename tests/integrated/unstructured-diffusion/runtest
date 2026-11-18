@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Steady cross-field diffusion on a skewed flat-cell annulus.
+
+Runs Hermes-3 on 1 and 3 processes, with and without the skew correction,
+and compares the final density with the steady state of the numpy reference
+operators (tools/unstructured/usops.py), which is a linear solve.
+The corrected and uncorrected solutions must also differ: the grid is skewed
+enough that the correction matters.
+"""
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+
+here = Path(__file__).resolve().parent
+for root in (here.parents[2], here.parents[3]):          # source tree, or source next to build
+    tools = root / "tools" / "unstructured"
+    if tools.is_dir():
+        break
+sys.path.insert(0, str(tools))
+import annulus  # noqa: E402
+import flatgrid  # noqa: E402
+import usdata  # noqa: E402
+import usops  # noqa: E402
+
+hermes = os.environ.get("HERMES_EXE", str(here / "../../../hermes-3"))
+N_CORE, LAMBDA, GRID = 1e19, 0.05, "annulus.grd.nc"
+
+g0 = annulus.build(8, 32, skew=0.4, jitter=0.3)
+flatgrid.write(g0, str(here / GRID), blocks=12)
+g = flatgrid.read(str(here / GRID))
+nreal, ntot = g["nreal"], g["nreal"] + g["nghost"]
+core = g["face_kind"] == flatgrid.KIND_CORE
+wall = g["face_kind"] == flatgrid.KIND_WALL
+
+
+def rhs(n_real, skew):
+    f = np.zeros(ntot)
+    f[:nreal] = n_real
+    f[g["face_R"][core]] = 1.0          # in units of the core density
+    f[g["face_R"][wall]] = f[g["face_L"][wall]]
+    one = np.ones(ntot)
+    return (usops.div_a_grad_perp_upwind(g, one, f, isotropic=True, skew=skew, limit=None)
+            + usops.wall_loss(g, one, f, 1 / LAMBDA))[:nreal]
+
+
+def steady(skew):
+    b = rhs(np.zeros(nreal), skew)
+    A = np.stack([rhs(e, skew) - b for e in np.eye(nreal)], 1)
+    return N_CORE * np.linalg.solve(A, -b)
+
+
+ref = {True: steady(True), False: steady(False)}
+change = np.abs(ref[True] - ref[False]).max() / N_CORE
+print("reference: density range %.3e to %.3e; the correction changes it by up to %.1f%% of the core value"
+      % (ref[True].min(), ref[True].max(), 100 * change))
+
+success = change > 0.01
+for nproc in (1, 3):
+    for skew in (True, False):
+        for f in (here / "data").glob("BOUT.dmp.*.nc"):
+            f.unlink()
+        cmd = ["mpirun", "-np", str(nproc), hermes, "-d", "data",
+               "unstructured:skew_correction=%s" % str(skew).lower()]
+        out = subprocess.run(cmd, cwd=here, capture_output=True, text=True)
+        (here / ("run.log.%d.%s" % (nproc, skew))).write_text(out.stdout + out.stderr)
+        if out.returncode != 0:
+            print("nproc %d, skew %s: Hermes-3 failed, see run.log" % (nproc, skew))
+            success = False
+            continue
+        r = usdata.Run(str(here / "data"), str(here / GRID))
+        n = r("Ni")
+        drift = np.abs(n[-1] - n[-2]).max() / N_CORE
+        err = np.abs(n[-1] - ref[skew]).max() / N_CORE
+        ok = err < 1e-5 and drift < 1e-6
+        success &= ok
+        print("nproc %d, skew correction %-5s: max |n - reference| / n_core = %.1e, change over the last output %.1e  %s"
+              % (nproc, skew, err, drift, "ok" if ok else "FAIL"))
+
+print(" => Test passed" if success else " => Test failed")
+sys.exit(0 if success else 1)
