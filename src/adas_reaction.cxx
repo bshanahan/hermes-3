@@ -13,6 +13,8 @@
 ///
 
 #include "../include/adas_reaction.hxx"
+
+#include <bout/constants.hxx>
 #include "../include/hermes_utils.hxx"
 #include "../include/integrate.hxx"
 
@@ -160,8 +162,11 @@ void OpenADAS::calculate_rates(GuardedOptions&& electron, GuardedOptions&& from_
   // Electron energy loss (radiation, ionisation potential)
   Field3D energy_loss = cellAverage(
       [&](BoutReal ne, BoutReal n1, BoutReal te) {
+        // The OpenADAS tables (plt, prb) hold the loss coefficient in W m^3,
+        // so it is divided by the electron charge to give eV m^3/s before
+        // it is normalised
         return floor(ne, 0.0) * floor(n1, 0.0)
-               * radiation_coef.evaluate(te * Tnorm, ne * Nnorm) * Nnorm
+               * radiation_coef.evaluate(te * Tnorm, ne * Nnorm) / SI::qe * Nnorm
                / (Tnorm * FreqNorm);
       },
       Ne.getRegion("RGN_NOBNDRY"))(Ne, N1, Te);
