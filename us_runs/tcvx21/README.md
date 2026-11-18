@@ -50,3 +50,26 @@ and get the balances with `python tcvx21/balance_struct.py t13_tcvx21_struct`.
 The two cases are not identical at the boundaries: the structured grid ends on
 flux surfaces (psiN 1.24 and 0.75) instead of the wall, its target rows are
 perpendicular to the flux surfaces, and its targets do not absorb neutrals.
+
+## Further variants and checks
+
+| Input | What it changes |
+| --- | --- |
+| `t12_tcvx21/wall_decay_3cm/BOUT.inp` | stage 1 with `wall_decay_length = 0.03` for ions and electrons |
+| `t15_tcvx21_carbon/BOUT.inp` | stage 1 with carbon sputtered from every wall face (`wall_sputtering`, yield 3.5% of the deuterium ion flow), charge states up to C4+ |
+
+The carbon case reads OpenADAS rates from `json_database/` in the directory
+Hermes-3 is started from: link it there (`ln -s ../json_database us_runs/`).
+It restarts from a stage-1 state to which trace carbon has been added.
+`python tcvx21/carbon.py <run dir>` prints the carbon content, source and
+radiation (rebuilt from the same tables; the ADAS reactions write no
+radiation diagnostic).
+
+Sputtering by the atoms that reach the wall as well (`from = d+, d`) gives
+several times more carbon than SOLPS-ITER has, because fluid atoms touch the
+wall about ten times per ionisation.
+
+`python tcvx21/reference.py check <run dir> tcvx21/reference/stage1_default.json`
+compares a stage-1 run with the recorded numbers: separatrix values, flows and
+the distance of each profile to the measurements. `stage1_two_point.json` is
+the record for `unstructured:skew_correction=false`.
