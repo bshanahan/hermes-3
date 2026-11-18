@@ -64,9 +64,15 @@ def load(run):
     fb = g["face_flux"]/g["face_B"]; sign = np.where(fb >= 0, 1.0, -1.0)
     gam = np.where(wall, Ni[R]*np.maximum(sign*Vi[R], 0), 0.0)          # parallel ion flux density at the sheath edge
     qpar = np.where(wall, (GAMMA_E*Te[R] + GAMMA_I*Ti[R])*qe*gam, 0.0)
+    # Electron density: deuterium ions plus the charge of any carbon ions in the run
+    # (their ghost cells hold sheath-edge values too). J_sat and q_par keep the deuterium flow only.
+    Ne = Ni.copy()
+    for k, name in enumerate(["c+"] + ["c+%d" % z for z in range(2, 7)], start=1):
+        if r.has("N" + name):
+            Ne = Ne + k*r("N" + name, True)[it]
     psin = psin_RZ(g["R"], g["Z"])                                       # cells and ghosts (ghosts sit on their face)
     grid_psin = 1 + g["psi"]*twopi/q["simagx"]   # grid file: Wb/rad, sign flipped; this eqdsk: Wb
-    return dict(r=r, g=g, n=n, t=r.t[it], Ne=Ni, Te=Te, Ti=Ti, gam=gam, qpar=qpar, psin=psin, grid_psin=grid_psin, wall=wall, L=L, R=R, fb=fb)
+    return dict(r=r, g=g, n=n, t=r.t[it], Ne=Ne, Te=Te, Ti=Ti, gam=gam, qpar=qpar, psin=psin, grid_psin=grid_psin, wall=wall, L=L, R=R, fb=fb)
 
 
 def load_structured(run, gridfile):
