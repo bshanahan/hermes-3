@@ -2,6 +2,7 @@
 
 usage: python tcvx21/compare.py <figure.png> <label>=<run dir> [<label>=<run dir> ...]
        (run from us_runs/)
+       A run on a structured (hypnotoad) grid is given as <label>=<run dir>::<grid file>.
 
 Observables (all against R^u - R^u_sep, the distance from the separatrix mapped
 along flux surfaces to the outboard midplane, as in the dataset):
@@ -68,8 +69,60 @@ def load(run):
     return dict(r=r, g=g, n=n, t=r.t[it], Ne=Ni, Te=Te, Ti=Ti, gam=gam, qpar=qpar, psin=psin, grid_psin=grid_psin, wall=wall, L=L, R=R, fb=fb)
 
 
+def load_structured(run, gridfile):
+    """Profiles of a run on a structured grid (NXPE = 1), for the same observables.
+
+    Target values are those on the target boundary: the mean of the last cell
+    and its guard cell. Each x index is a flux surface, so its psiN is taken
+    from the last row of the outer leg, which lies inside the geqdsk box.
+    """
+    import glob
+    files = sorted(glob.glob(run + "/BOUT.dmp.*.nc"), key=lambda f: int(f.split(".")[-2]))
+    ds = [netCDF4.Dataset(f) for f in files]
+    myg = int(ds[0]["MYG"][...]); mxg = int(ds[0]["MXG"][...]); ny = int(ds[0]["ny"][...])
+    t = float(ds[0]["t_array"][-1])/float(ds[0]["Omega_ci"][...])
+
+    def get(name):
+        parts = []
+        for k, dd in enumerate(ds):
+            v = dd[name]; a = np.asarray(v[-1, :, :, 0]) * (v.getncattr("conversion") if "conversion" in v.ncattrs() else 1.0)
+            lo = 0 if k == 0 else myg; hi = a.shape[1] if k == len(ds) - 1 else a.shape[1] - myg
+            parts.append(a[:, lo:hi])
+        return np.concatenate(parts, axis=1)            # (nx, ny + 2 myg)
+    N, Te, Ti, V = get("Nd+"), get("Te"), get("Td+"), get("Vd+")
+    with netCDF4.Dataset(gridfile) as gf:
+        R, Z = np.asarray(gf["Rxy"][:]), np.asarray(gf["Zxy"][:]); j1, j2 = int(gf["jyseps1_1"][...]), int(gf["jyseps2_2"][...]); ixs = int(gf["ixseps1"][...])
+    xs = slice(mxg, R.shape[0] - mxg)
+    inner = lambda a: a[xs, myg:-myg]                    # (nx - 2 mxg, ny)
+    Rc, Zc, Nc, Tec, Tic = R[xs], Z[xs], inner(N), inner(Te), inner(Ti)
+    psin_x = psin_RZ(Rc[:, -1], Zc[:, -1])               # psiN of each x index
+    rows = np.arange(j1 + 1, j2 + 1)
+    jm = rows[np.argmin(np.where(Rc[ixs - mxg, rows] > q["rmagx"], np.abs(Zc[ixs - mxg, rows] - Z_OMP), np.inf))]
+    prof = {}
+    xm = rsep_of_psin(psin_RZ(Rc[:, jm], Zc[:, jm])); cs = np.sqrt(qe*(Tec[:, jm] + Tic[:, jm])/(2*1.67262192e-27))
+    prof["FHRP", "density"], prof["FHRP", "electron_temp"], prof["FHRP", "jsat"] = (xm, Nc[:, jm]), (xm, Tec[:, jm]), (xm, 0.5*qe*Nc[:, jm]*cs)
+    sel = (np.abs(Rc - 0.9) < 0.012) & (Zc < -0.2)
+    xt = rsep_of_psin(psin_RZ(Rc[sel], Zc[sel]))
+    prof["TS", "density"], prof["TS", "electron_temp"] = (xt, Nc[sel]), (xt, Tec[sel])
+    xtar = rsep_of_psin(psin_x)
+    for diag, jb in (("LFS-LP", ny + myg - 1), ("HFS-LP", myg - 1)):      # boundary between rows jb and jb + 1 of the guarded arrays
+        b = lambda a: 0.5*(a[xs, jb] + a[xs, jb + 1])
+        gam = b(N)*np.abs(b(V))
+        prof[diag, "density"], prof[diag, "electron_temp"], prof[diag, "jsat"] = (xtar, b(N)), (xtar, b(Te)), (xtar, qe*gam)
+        if diag == "LFS-LP":
+            prof["LFS-IR", "q_parallel"] = (xtar, (GAMMA_E*b(Te) + GAMMA_I*b(Ti))*qe*gam + 13.6*qe*gam)
+    isep = ixs - mxg
+    print("%s (structured): t = %.1f ms | midplane row Z = %.3f m | either side of the separatrix: n_e %.2e / %.2e m^-3, Te %.1f / %.1f eV, Ti %.1f / %.1f eV" % (
+        run, 1e3*t, Zc[isep, jm], Nc[isep - 1, jm], Nc[isep, jm], Tec[isep - 1, jm], Tec[isep, jm], Tic[isep - 1, jm], Tic[isep, jm]))
+    for dd in ds: dd.close()
+    return dict(struct=True, prof=prof, t=t)
+
+
 def sim_profile(d, diag, obs):
     """(R^u - R^u_sep [cm], value) of the simulation for one observable, sorted"""
+    if d.get("struct"):
+        x, val = d["prof"][diag, obs]; o = np.argsort(x)
+        return np.asarray(x)[o], np.asarray(val)[o]
     g, n = d["g"], d["n"]
     if diag == "FHRP":
         sel = np.flatnonzero((np.abs(g["Z"][:n] - Z_OMP) < 0.012) & (g["R"][:n] > q["rmagx"]))
@@ -115,9 +168,10 @@ def distance(xs, vs, xe, ve, ee):
 if __name__ == "__main__":
     fig_path = sys.argv[1]
     runs = [a.split("=", 1) for a in sys.argv[2:]]
-    data = {lab: load(path) for lab, path in runs}
+    data = {lab: (load_structured(*path.split("::")) if "::" in path else load(path)) for lab, path in runs}
     colors = ["#1f5fa8", "#2a8a57", "#7a4fb5", "#b8860b"]
     for lab, d in data.items():
+        if d.get("struct"): continue
         dev = np.abs(d["psin"][:d["n"]] - d["grid_psin"][:d["n"]]).max()
         print("%s: t = %.1f ms; psiN of the grid file and of the geqdsk agree to %.1e; R_sep at Z=0: %.4f m" % (lab, 1e3*d["t"], dev, R_sep))
 
@@ -152,5 +206,5 @@ if __name__ == "__main__":
     for lab in data:
         m = np.nanmean(np.array(summary[lab]), axis=0)
         print("mean d_j over these %d observables: %s forward %.2f, reversed %.2f | SOLPS-ITER standard %.2f, %.2f" % (len(panels), lab, m[0], m[1], *np.mean(np.array(solps_all), axis=0)))
-    fig.suptitle("TCV-X21: Hermes-3 on a GOAT grid against the experimental dataset (no drifts, so both field directions are shown)")
+    fig.suptitle("TCV-X21: Hermes-3 against the experimental dataset (no drifts, so both field directions are shown)")
     fig.savefig(fig_path, dpi=105, bbox_inches="tight")

@@ -59,6 +59,8 @@ with open(eq_path, "w") as f:
 settings = dict(
     orthogonal=True, shiftedmetric=True, y_boundary_guards=0, number_of_processors=1,
     curvature_type="curl(b/B)",
+    reverse_current=True,         # this equilibrium gives Bp < 0 and a negative Jacobian, which BOUT++
+                                  # rejects. Without drifts the direction of Bp does not matter.
     psinorm_core=0.90,            # as the GOAT grid
     psinorm_sol=1.24,             # the inner wall touches psiN = 1.257 above the X-point
     psinorm_pf=0.75,
@@ -76,4 +78,9 @@ with open(eq_path) as f:
 mesh = BoutMesh(eq, settings)
 mesh.geometry()
 mesh.writeGridfile(name)
+# every radial edge cell is a wall that can absorb neutrals (used when neutral_pump = true)
+import netCDF4
+with netCDF4.Dataset(name, "a") as d:
+    v = d.createVariable("is_pump", "f8", d["J"].dimensions)
+    v[:] = 1.0
 print("wrote", name)

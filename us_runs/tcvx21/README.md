@@ -36,3 +36,17 @@ equilibrium and wall for comparison.
 
 The valve position and the reading of the paper's recycling coefficient
 (R = 0.99) are assumptions; the paper does not give them in full.
+
+## Orthogonal grid
+
+`t13_tcvx21_struct/BOUT.inp` is the stage-1 case on the hypnotoad grid, run
+with the same binary (`mpirun -np 13`, so that the branch cuts fall on
+processor boundaries). Compare both grids with
+
+    python tcvx21/compare.py fig.png "GOAT grid=t12_tcvx21" \
+        "orthogonal grid=t13_tcvx21_struct::tcvx21/structured/tcvx21_32x104.grd.nc"
+
+and get the balances with `python tcvx21/balance_struct.py t13_tcvx21_struct`.
+The two cases are not identical at the boundaries: the structured grid ends on
+flux surfaces (psiN 1.24 and 0.75) instead of the wall, its target rows are
+perpendicular to the flux surfaces, and its targets do not absorb neutrals.
