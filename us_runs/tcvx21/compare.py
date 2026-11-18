@@ -101,7 +101,7 @@ def load_structured(run, gridfile):
     prof = {}
     xm = rsep_of_psin(psin_RZ(Rc[:, jm], Zc[:, jm])); cs = np.sqrt(qe*(Tec[:, jm] + Tic[:, jm])/(2*1.67262192e-27))
     prof["FHRP", "density"], prof["FHRP", "electron_temp"], prof["FHRP", "jsat"] = (xm, Nc[:, jm]), (xm, Tec[:, jm]), (xm, 0.5*qe*Nc[:, jm]*cs)
-    sel = (np.abs(Rc - 0.9) < 0.012) & (Zc < -0.2)
+    sel = (np.abs(Rc - 0.9) < 0.012) & (Zc < -0.2) & (Zc > -0.70)
     xt = rsep_of_psin(psin_RZ(Rc[sel], Zc[sel]))
     prof["TS", "density"], prof["TS", "electron_temp"] = (xt, Nc[sel]), (xt, Tec[sel])
     xtar = rsep_of_psin(psin_x)
@@ -130,7 +130,7 @@ def sim_profile(d, diag, obs):
         val = {"density": d["Ne"], "electron_temp": d["Te"], "jsat": 0.5*qe*d["Ne"]*cs}[obs][sel]   # probe: J_sat = 0.5 e n c_s
         x = rsep_of_psin(d["psin"][sel])
     elif diag == "TS":
-        sel = np.flatnonzero((np.abs(g["R"][:n] - 0.9) < 0.012) & (g["Z"][:n] < -0.2))
+        sel = np.flatnonzero((np.abs(g["R"][:n] - 0.9) < 0.012) & (g["Z"][:n] < -0.2) & (g["Z"][:n] > -0.70))   # lowest Thomson point is at Z = -0.692
         val = {"density": d["Ne"], "electron_temp": d["Te"]}[obs][sel]
         x = rsep_of_psin(d["psin"][sel])
     else:
