@@ -1,0 +1,7 @@
+# run output and downloaded material are not kept in the repository
+run.log
+*.png
+*.geqdsk
+*.eqdsk
+tcvx21/data/
+tcvx21/papers/
