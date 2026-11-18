@@ -21,6 +21,7 @@
 */
 
 #include "include/unstructured.hxx"
+#include <algorithm>
 #include "hermes-3.hxx"
 #include "revision.hxx"
 
@@ -74,6 +75,7 @@
 #include "include/sheath_boundary_simple.hxx"
 #include "include/sheath_boundary_unstructured.hxx"
 #include "include/wall_puff.hxx"
+#include "include/wall_sputtering.hxx"
 #include "include/sheath_closure.hxx"
 #include "include/simple_conduction.hxx"
 #include "include/simple_pump.hxx"
@@ -274,6 +276,52 @@ int Hermes::init(bool restarting) {
 
   if (Unstructured::present(mesh)) {
     Unstructured::initialise(mesh, rho_s0, Bnorm);
+
+    // Only some components have been written or checked for flat-cell grids.
+    // The others would run on the placeholder metric and give meaningless
+    // results, so refuse them unless asked not to.
+    static const std::vector<std::string> supported = {
+        "evolve_density", "evolve_momentum", "evolve_pressure", "anomalous_diffusion",
+        "neutral_mixed", "neutral_boundary", "quasineutral", "zero_current",
+        "sheath_boundary_unstructured", "braginskii_collisions", "braginskii_friction",
+        "braginskii_heat_exchange", "braginskii_thermal_force", "braginskii_conduction",
+        "electron_force_balance", "recycling", "reactions", "wall_puff", "wall_sputtering",
+        "sound_speed", "set_temperature"};
+    const bool allow_untested =
+        Options::root()["unstructured"]["allow_untested_components"]
+            .doc("Run components that have not been checked on flat-cell grids?")
+            .withDefault<bool>(false);
+    std::string list = options["components"].as<std::string>();
+    list.erase(std::remove_if(list.begin(), list.end(),
+                              [](char c) { return c == '(' or c == ')'; }),
+               list.end());
+    for (const auto& entry : strsplit(list, ',')) {
+      const std::string name = trim(entry);
+      if (name.empty()) {
+        continue;
+      }
+      const std::string types = Options::root()[name].isSet("type")
+                                    ? Options::root()[name]["type"].as<std::string>()
+                                    : name;
+      for (const auto& type_entry : strsplit(types, ',')) {
+        const std::string type = trim(type_entry, " \t()");
+        // A reaction ("d + e -> d+ + 2e") is handled by the reactions component
+        if (type.empty() or type.find("->") != std::string::npos
+            or type.rfind("fixed_fraction", 0) == 0
+            or std::find(supported.begin(), supported.end(), type) != supported.end()) {
+          continue;
+        }
+        if (allow_untested) {
+          output_warn.write("Component type '{}' has not been checked on flat-cell "
+                            "(unstructured) grids\n", type);
+        } else {
+          throw BoutException(
+              "Component type '{}' (in [{}]) is not supported on flat-cell (unstructured) "
+              "grids. Set unstructured:allow_untested_components = true to run it anyway",
+              type, name);
+        }
+      }
+    }
   }
 
   // Tell the components if they are restarting

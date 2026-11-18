@@ -4,7 +4,10 @@
 
 #include <bout/field3d.hxx>
 #include <bout/mesh.hxx>
+#include <bout/utils.hxx>
 
+#include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <utility>
@@ -76,6 +79,44 @@ public:
   std::vector<BoutReal> face_length; ///< Poloidal length
   std::vector<BoutReal> nR, nZ;      ///< Unit normal in the poloidal plane, from L to R
   std::vector<BoutReal> face_R, face_Z; ///< Position of the face mid-point [m]
+  /// Area of a wall face projected on the flux surface normal, per radian.
+  /// Zero on other faces.
+  std::vector<BoutReal> wall_perp_area;
+
+  /// Skew correction of the cross-field operators (see flatgrid.py): the
+  /// gradient at a face also takes the difference of the field between the
+  /// two vertices of the face, interpolated from nearby cells.
+  bool skew_correction{false};
+  bool skew_correction_mean{false}; ///< Also in Div_a_Grad_perp, which the neutrals use
+  std::vector<BoutReal> vperp, viso; ///< Coefficient of the vertex difference
+  std::vector<int> sptr, scell;      ///< Vertex difference as a sum over cells (CSR by face)
+  std::vector<BoutReal> sw;
+  /// The correction is kept below this multiple of the two-point term, so that
+  /// the flow between two cells never runs from the lower to the higher value
+  /// (for skew_limit <= 1) and the operator cannot create a new minimum.
+  BoutReal skew_limit{1.0};
+  /// Two-point gradient term plus the limited vertex correction
+  /// The bound is approached smoothly, which Newton iterations need. For the
+  /// same reason it does not go to zero with the two-point term: a difference
+  /// of `skew_smooth` times the mean size of the field is added in quadrature.
+  BoutReal skew_smooth{0.05};
+  BoutReal correctedGradient(BoutReal two_point, BoutReal trans, BoutReal v,
+                             const Buffer& f, int i) const {
+    const BoutReal floor_diff =
+        skew_smooth * 0.5 * (std::abs(f[faceL[i]]) + std::abs(f[faceR[i]])) * trans;
+    const BoutReal bound = skew_limit * std::sqrt(SQ(two_point) + SQ(floor_diff));
+    const BoutReal correction = v * vertexDifference(f, i);
+    return two_point
+           + correction * bound / std::sqrt(SQ(bound) + SQ(correction) + 1e-300);
+  }
+  /// Value at vertex 2 minus value at vertex 1 of face `i`
+  BoutReal vertexDifference(const Buffer& f, int i) const {
+    BoutReal sum = 0.0;
+    for (int k = sptr[i]; k < sptr[i + 1]; k++) {
+      sum += sw[k] * f[scell[k]];
+    }
+    return sum;
+  }
 
   /// Values of `f` on all local cells, halo cells included (communicates)
   Buffer gather(const Field3D& f) const;
@@ -98,11 +139,19 @@ public:
   /// Div(a Grad_perp(f)), with `a` taken from the upwind side.
   /// Radial only by default; `isotropic` includes the poloidal part of Grad_perp.
   /// No flux through wall faces; core faces use the ghost value.
+  /// With the skew correction the sign of the whole gradient picks the side.
   Field3D Div_a_Grad_perp_upwind(const Field3D& a, const Field3D& f,
                                  bool isotropic = false) const;
   /// Div(a Grad_perp(f)) with the mean of `a` at each face. Includes the
   /// poloidal part of Grad_perp. No flux through wall faces.
   Field3D Div_a_Grad_perp(const Field3D& a, const Field3D& f) const;
+  /// Loss through wall faces with a decay length: the flow out of each cell
+  /// next to the wall is a * f * (wall area projected on the flux surface
+  /// normal) * inv_length, with `a` and `f` taken in that cell. Returns the
+  /// (negative) source. If `flow` is given, the flow through each wall face
+  /// is added to its ghost cell.
+  Field3D wallLoss(const Field3D& a, const Field3D& f, BoutReal inv_length,
+                   Field3D* flow = nullptr) const;
   /// |Grad_perp(f)|^2 at cell centres, from a Green-Gauss gradient
   Field3D gradPerpSq(const Field3D& f) const;
 

@@ -185,6 +185,8 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
     setPermissions(readIfSet("species:{from}:energy_flow_xlow"));
     setPermissions(readIfSet("species:{from}:particle_flow_xlow"));
   }
+  // Unstructured grids: ions lost across the field to the wall
+  setPermissions(readIfSet("species:{from}:wall_loss_flow"));
   substitutePermissions("to",
                         std::vector<std::string>(to_species.begin(), to_species.end()));
   substitutePermissions(
@@ -279,6 +281,11 @@ void Recycling::transform_impl(GuardedOptions& state) {
       channel.target_recycle_energy_source = 0.0;
       // Mean wall-normal speed of a cosine distribution at the recycling energy
       const BoutReal launch_speed = (2. / 3) * sqrt(2. * channel.target_energy / AAn);
+      // Ions lost across the field to the wall (anomalous_diffusion with
+      // wall_decay_length): flow through each wall face, held in its ghost cell
+      const bool has_wall_loss = species_from.isSet("wall_loss_flow");
+      const Field3D wall_loss =
+          has_wall_loss ? get<Field3D>(species_from["wall_loss_flow"]) : Field3D{0.0};
       if (target_recycle) {
         for (int f = 0; f < us.nfaces; f++) {
           if (us.face_kind[f] != Unstructured::wall) {
@@ -292,7 +299,8 @@ void Recycling::transform_impl(GuardedOptions& state) {
               pump ? channel.pump_multiplier : channel.target_multiplier;
           // Ion flow out of the domain through this face
           const BoutReal flow =
-              std::max(N(0, g, 0) * V(0, g, 0) * us.flux_over_B[f], 0.0);
+              std::max(N(0, g, 0) * V(0, g, 0) * us.flux_over_B[f], 0.0)
+              + (has_wall_loss ? wall_loss(0, g, 0) : 0.0);
           const BoutReal particle_source = multiplier * flow / us.vol[c];
           const BoutReal heat_source = particle_source * channel.target_energy;
           channel.target_recycle_density_source(0, i, 0) += particle_source;

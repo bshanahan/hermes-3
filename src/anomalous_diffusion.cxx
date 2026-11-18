@@ -64,6 +64,15 @@ AnomalousDiffusion::AnomalousDiffusion(std::string name, Options& alloptions, So
                             "leaving out the poloidal part of Grad_perp?")
                        .withDefault<bool>(false);
 
+  const BoutReal wall_decay_length =
+      alloptions[name]["wall_decay_length"]
+          .doc("Unstructured grids: decay length [m] of the cross-field loss to the "
+               "wall. The flux through a wall face is D * n / length (and "
+               "chi * n * T / length for heat), on the part of the face that "
+               "faces across the flux surfaces. Zero or negative: no loss")
+          .withDefault<BoutReal>(0.0);
+  us_wall_inv_length = (wall_decay_length > 0.0) ? rho_s0 / wall_decay_length : 0.0;
+
   diagnose = alloptions[name]["diagnose"]
                  .doc("Output additional diagnostics?")
                  .withDefault<bool>(false);
@@ -79,6 +88,9 @@ AnomalousDiffusion::AnomalousDiffusion(std::string name, Options& alloptions, So
     output_vars.push_back("density_source");
     output_vars.push_back("particle_flow_xlow");
     output_vars.push_back("particle_flow_ylow");
+    if (us_wall_inv_length > 0.0) {
+      output_vars.push_back("wall_loss_flow");
+    }
   }
   if (include_D or include_chi) {
     output_vars.push_back("energy_source");
@@ -131,6 +143,25 @@ void AnomalousDiffusion::transform_impl(GuardedOptions& state) {
       const BoutReal AA = get<BoutReal>(species["AA"]);
       add(species["momentum_source"],
           us.Div_a_Grad_perp_upwind(Field3D{anomalous_nu} * AA * N, V3, iso));
+    }
+    if (us_wall_inv_length > 0.0) {
+      // Cross-field loss to the wall with a decay length. The particle flow
+      // through each wall face goes to the recycling component.
+      const BoutReal inv = us_wall_inv_length;
+      if (include_D) {
+        const Field3D D{anomalous_D};
+        const BoutReal AA = get<BoutReal>(species["AA"]);
+        Field3D flow{zeroFrom(N)};
+        flow.allocate();
+        add(species["density_source"], us.wallLoss(D, N, inv, &flow));
+        add(species["momentum_source"], us.wallLoss(AA * V3 * D, N, inv));
+        add(species["energy_source"], us.wallLoss((3. / 2) * T3 * D, N, inv));
+        set(species["wall_loss_flow"], flow);
+      }
+      if (include_chi) {
+        add(species["energy_source"],
+            us.wallLoss(Field3D{anomalous_chi} * N, T3, inv));
+      }
     }
     return;
   }

@@ -162,10 +162,59 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   // faces of a cell it owns. That covers the face neighbours, their
   // neighbours along the flux tube and their ghost cells.
 
+  // Skew correction: each face also needs the cells around its two vertices
+  const bool has_stencils = mesh->sourceHasVar("us_face_sptr");
+  us.skew_correction =
+      Options::root()["unstructured"]["skew_correction"]
+          .doc("Correct the cross-field operators for skewed cells, using values "
+               "interpolated to the vertices? Needs a grid file written with the "
+               "vertex stencils")
+          .withDefault<bool>(has_stencils);
+  us.skew_correction_mean =
+      Options::root()["unstructured"]["skew_correction_neutrals"]
+          .doc("Apply the skew correction to the diffusion of neutrals as well?")
+          .withDefault<bool>(us.skew_correction);
+  if (us.skew_correction_mean and !us.skew_correction) {
+    throw BoutException("unstructured:skew_correction_neutrals needs skew_correction");
+  }
+  us.skew_limit =
+      Options::root()["unstructured"]["skew_limit"]
+          .doc("Largest size of the skew correction at a face, as a multiple of the "
+               "two-point term. Values up to 1 keep the flow between two cells "
+               "running from the higher to the lower value")
+          .withDefault<BoutReal>(1.0);
+  us.skew_smooth =
+      Options::root()["unstructured"]["skew_smooth"]
+          .doc("Smoothing of the bound on the skew correction: this fraction of the "
+               "mean size of the field counts as a difference between the two cells. "
+               "Without it the bound has a kink wherever two cells hold the same "
+               "value, and the implicit solver takes very small steps")
+          .withDefault<BoutReal>(0.05);
+  if (us.skew_correction and !has_stencils) {
+    throw BoutException("unstructured:skew_correction needs a grid file with vertex "
+                        "stencils (us_face_sptr). Regenerate the grid");
+  }
+  std::vector<int> all_sptr(nfaces + 1, 0);
+  std::vector<int> all_scell;
+  std::vector<BoutReal> all_sw;
+  if (us.skew_correction) {
+    all_sptr = getInts(mesh, "us_face_sptr", nfaces + 1);
+    all_scell = getInts(mesh, "us_face_scell", all_sptr[nfaces]);
+    all_sw = getReals(mesh, "us_face_sw", all_sptr[nfaces], 1.0);
+  }
+
   std::vector<std::vector<int>> adjacent(ncells);
   for (int f = 0; f < nfaces; f++) {
     adjacent[all_faceL[f]].push_back(all_faceR[f]);
     adjacent[all_faceR[f]].push_back(all_faceL[f]);
+    for (int k = all_sptr[f]; k < all_sptr[f + 1]; k++) {
+      const int c = all_scell[k];
+      if (c < 0 or c >= ncells) {
+        throw BoutException("Unstructured grid: face {} has stencil cell {}", f, c);
+      }
+      adjacent[all_faceL[f]].push_back(c);
+      adjacent[all_faceR[f]].push_back(c);
+    }
   }
   const auto haloOf = [&](int proc) {
     const int lo = proc * us.nlocal;
@@ -277,11 +326,35 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   // Flux [T m^2] / B [T]
   us.flux_over_B = pick(getReals(mesh, "us_face_flux", nfaces, L * L), faces);
   const auto faceB = pick(getReals(mesh, "us_face_B", nfaces, 1.0), faces);
+  const auto faceBp = pick(getReals(mesh, "us_face_Bp", nfaces, 1.0), faces);
+  if (us.skew_correction) {
+    us.vperp = pick(getReals(mesh, "us_face_vperp", nfaces, L), faces);
+    us.viso = pick(getReals(mesh, "us_face_viso", nfaces, L), faces);
+    us.sptr.assign(1, 0);
+    for (const int f : faces) {
+      for (int k = all_sptr[f]; k < all_sptr[f + 1]; k++) {
+        const int c = local[all_scell[k]];
+        if (c < 0) {
+          throw BoutException(
+              "Unstructured grid: face {} has a stencil cell outside the halo", f);
+        }
+        us.scell.push_back(c);
+        us.sw.push_back(all_sw[k]);
+      }
+      us.sptr.push_back(static_cast<int>(us.scell.size()));
+    }
+  }
   us.faceL.resize(us.nfaces);
   us.faceR.resize(us.nfaces);
   us.face_up.resize(us.nfaces);
   for (int i = 0; i < us.nfaces; i++) {
     const int f = faces[i];
+    // Magnetic flux / (area * Bp) is the cosine between the face normal and the
+    // poloidal field; the rest of the normal points across the flux surfaces
+    const BoutReal bn_pol =
+        std::min(1.0, std::abs(us.flux_over_B[i]) / (us.face_area[i] * std::max(faceBp[i], 1e-30)));
+    us.wall_perp_area.push_back(
+        (us.face_kind[i] == wall) ? us.face_area[i] * std::sqrt(1.0 - SQ(bn_pol)) : 0.0);
     us.flux_over_B[i] /= faceB[i];
     us.faceL[i] = local[all_faceL[f]];
     us.faceR[i] = local[all_faceR[f]];
@@ -314,8 +387,10 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
           .withDefault<bool>(true);
 
   output.write("Unstructured grid: {} cells, {} ghost cells, {} faces in total; "
-               "{} cells, {} halo cells and {} faces on this processor\n",
-               nreal, nghost, nfaces, us.nlocal, halo.size(), us.nfaces);
+               "{} cells, {} halo cells and {} faces on this processor. "
+               "Skew correction {}\n",
+               nreal, nghost, nfaces, us.nlocal, halo.size(), us.nfaces,
+               us.skew_correction ? "on" : "off");
   instance = std::move(us);
 }
 
@@ -544,7 +619,10 @@ Field3D Unstructured::Div_a_Grad_perp_upwind(const Field3D& a_in, const Field3D&
     }
     const int L = faceL[i];
     const int R = faceR[i];
-    const BoutReal gradient = trans[i] * (f[R] - f[L]);
+    BoutReal gradient = trans[i] * (f[R] - f[L]);
+    if (skew_correction) {
+      gradient = correctedGradient(gradient, trans[i], isotropic ? viso[i] : vperp[i], f, i);
+    }
     // Flow is from high to low f: coefficient from the cell it leaves
     const BoutReal flow = gradient * ((gradient > 0) ? a[R] : a[L]); // Into L
     if (L < nlocal) {
@@ -567,12 +645,33 @@ Field3D Unstructured::Div_a_Grad_perp(const Field3D& a_in, const Field3D& f_in) 
     }
     const int L = faceL[i];
     const int R = faceR[i];
-    const BoutReal flow = 0.5 * (a[L] + a[R]) * tiso[i] * (f[R] - f[L]); // Into L
+    BoutReal gradient = tiso[i] * (f[R] - f[L]);
+    if (skew_correction_mean) {
+      gradient = correctedGradient(gradient, tiso[i], viso[i], f, i);
+    }
+    const BoutReal flow = 0.5 * (a[L] + a[R]) * gradient; // Into L
     if (L < nlocal) {
       result(0, ys + L, 0) += flow / vol[L];
     }
     if (face_kind[i] == interior and R < nlocal) {
       result(0, ys + R, 0) -= flow / vol[R];
+    }
+  }
+  return result;
+}
+
+Field3D Unstructured::wallLoss(const Field3D& a, const Field3D& f, BoutReal inv_length,
+                               Field3D* flow) const {
+  Field3D result{zeroFrom(f)};
+  for (int i = 0; i < nfaces; i++) {
+    if (face_kind[i] != wall or wall_perp_area[i] == 0.0) {
+      continue;
+    }
+    const int y = ys + faceL[i]; // A wall face and both its cells are owned here
+    const BoutReal out = a(0, y, 0) * f(0, y, 0) * wall_perp_area[i] * inv_length;
+    result(0, y, 0) -= out / vol[faceL[i]];
+    if (flow != nullptr) {
+      (*flow)(0, ys + faceR[i], 0) += out;
     }
   }
   return result;

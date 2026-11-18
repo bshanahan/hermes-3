@@ -181,6 +181,7 @@ set(HERMES_SOURCES
     include/sheath_boundary_unstructured.hxx
     include/unstructured.hxx
     include/wall_puff.hxx
+    include/wall_sputtering.hxx
     include/sheath_boundary_insulating.hxx
     include/simple_conduction.hxx
     include/snb_conduction.hxx
@@ -409,6 +410,7 @@ if(HERMES_TESTS)
   hermes_add_integrated_test(1D-sheath CONFLICTS BOUT_USE_METRIC_3D
                              TEST_EXECUTABLE test_sheath.py)
   hermes_add_integrated_test(diffusion CONFLICTS BOUT_USE_METRIC_3D)
+  hermes_add_integrated_test(unstructured-diffusion CONFLICTS BOUT_USE_METRIC_3D)
   hermes_add_integrated_test(evolve_density CONFLICTS BOUT_USE_METRIC_3D)
   hermes_add_integrated_test(neutral_mixed CONFLICTS BOUT_USE_METRIC_3D)
   hermes_add_integrated_test(vorticity CONFLICTS BOUT_USE_METRIC_3D)

@@ -33,6 +33,7 @@ private:
   std::string name; ///< Species name
 
   bool us_radial_only; ///< Unstructured grids: radial diffusion only
+  BoutReal us_wall_inv_length{0.0}; ///< Unstructured grids: 1 / (decay length at the wall), normalised; 0 = no loss
   bool diagnose;                           ///< Outputting diagnostics?
   bool include_D, include_chi, include_nu; ///< Which terms should be included?
   Coordinates::FieldMetric anomalous_D;    ///< Anomalous density diffusion coefficient
