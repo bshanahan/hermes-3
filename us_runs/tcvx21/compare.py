@@ -2,7 +2,8 @@
 
 usage: python tcvx21/compare.py <figure.png> <label>=<run dir> [<label>=<run dir> ...]
        (run from us_runs/)
-       A run on a structured (hypnotoad) grid is given as <label>=<run dir>::<grid file>.
+       A run on a structured (hypnotoad) grid is given as <label>=<run dir>::<grid file>,
+       a flat-cell run on another grid file as <label>=<run dir>@@<grid file>.
 
 Observables (all against R^u - R^u_sep, the distance from the separatrix mapped
 along flux surfaces to the outboard midplane, as in the dataset):
@@ -57,8 +58,36 @@ rsep_of_psin = lambda p: 100*(np.interp(p, _pm, _Rm) - R_sep)      # cm
 psin_of_rsep = lambda r: np.interp(R_sep + np.asarray(r)/100, _Rm, _pm)
 
 
-def load(run):
-    r = usdata.Run(run, GRID); g = r.g; n = r.n; it = -1
+# How the cells along a measurement line are picked:
+#   "band"  every cell whose centre is within 1.2 cm of the line (the standard grid)
+#   "tube"  the nearest cell of each flux tube, if within 4 cm: works at any resolution
+SELECT = "band"
+
+
+def line_cells(g, n, coord, mask, band=0.012, reach=0.04):
+    """Real cells along the line coord = 0, among those where `mask` holds"""
+    if SELECT == "band":
+        return np.flatnonzero((np.abs(coord) < band) & mask)
+    tube = g["tube"][:n]
+    out = []
+    for t in np.unique(tube):
+        m = np.flatnonzero((tube == t) & mask)
+        if len(m):
+            j = m[np.argmin(np.abs(coord[m]))]
+            if abs(coord[j]) < reach:
+                out.append(j)
+    return np.array(out, int)
+
+
+def midplane_cells(g, n):
+    return line_cells(g, n, g["Z"][:n] - Z_OMP, g["R"][:n] > q["rmagx"])
+
+
+def load(run, grid=None):
+    """A flat-cell run; `run` may be '<dir>@@<grid file>' for a grid other than GRID"""
+    if "@@" in run:
+        run, grid = run.split("@@")
+    r = usdata.Run(run, grid or GRID); g = r.g; n = r.n; it = -1
     Ni = r("Nd+", True)[it]; Vi = r("Vd+", True)[it]; Ti = r("Td+", True)[it]; Te = r("Te", True)[it]
     L, R = g["face_L"], g["face_R"]; wall = g["face_kind"] == 2
     fb = g["face_flux"]/g["face_B"]; sign = np.where(fb >= 0, 1.0, -1.0)
@@ -131,12 +160,12 @@ def sim_profile(d, diag, obs):
         return np.asarray(x)[o], np.asarray(val)[o]
     g, n = d["g"], d["n"]
     if diag == "FHRP":
-        sel = np.flatnonzero((np.abs(g["Z"][:n] - Z_OMP) < 0.012) & (g["R"][:n] > q["rmagx"]))
+        sel = midplane_cells(g, n)
         cs = np.sqrt(qe*(d["Te"] + d["Ti"])/(2*1.67262192e-27))
         val = {"density": d["Ne"], "electron_temp": d["Te"], "jsat": 0.5*qe*d["Ne"]*cs}[obs][sel]   # probe: J_sat = 0.5 e n c_s
         x = rsep_of_psin(d["psin"][sel])
     elif diag == "TS":
-        sel = np.flatnonzero((np.abs(g["R"][:n] - 0.9) < 0.012) & (g["Z"][:n] < -0.2) & (g["Z"][:n] > -0.70))   # lowest Thomson point is at Z = -0.692
+        sel = line_cells(g, n, g["R"][:n] - 0.9, (g["Z"][:n] < -0.2) & (g["Z"][:n] > -0.70))   # lowest Thomson point is at Z = -0.692
         val = {"density": d["Ne"], "electron_temp": d["Te"]}[obs][sel]
         x = rsep_of_psin(d["psin"][sel])
     else:
@@ -175,7 +204,7 @@ if __name__ == "__main__":
     fig_path = sys.argv[1]
     runs = [a.split("=", 1) for a in sys.argv[2:]]
     data = {lab: (load_structured(*path.split("::")) if "::" in path else load(path)) for lab, path in runs}
-    colors = ["#1f5fa8", "#2a8a57", "#7a4fb5", "#b8860b"]
+    colors = ["#1f5fa8", "#2a8a57", "#7a4fb5", "#b8860b", "#c2185b", "#00838f"]
     for lab, d in data.items():
         if d.get("struct"): continue
         dev = np.abs(d["psin"][:d["n"]] - d["grid_psin"][:d["n"]]).max()
@@ -198,19 +227,24 @@ if __name__ == "__main__":
             a.errorbar(xe, ve*scale, ee*scale, fmt=mk, ms=3, color=c, lw=0.8, capsize=1.5, label="experiment, %s field" % field)
             xmin, xmax = min(xmin, xe.min()), max(xmax, xe.max())
         row = []
+        pad = 0.15*(xmax - xmin)
+        ytop = max(np.nanmax((exp[f][1] + exp[f][2])*scale) for f in exp)
         for (lab, d), c in zip(data.items(), colors):
             xs, vs = sim_profile(d, diag, obs)
+            inside = (xs > xmin - pad) & (xs < xmax + pad)
+            if inside.any():
+                ytop = max(ytop, np.nanmax(vs[inside]*scale))
             a.plot(xs, vs*scale, "-", color=c, lw=1.8, marker=".", ms=4, label="Hermes-3, " + lab)
             dj = [distance(xs, vs, *exp[f])[0] for f in ("forward", "reversed")]
             row.append("%6.2f %6.2f" % tuple(dj)); summary[lab].append(dj)
         solps_all.append(SOLPS[(diag, obs)])
         print("%-8s %-14s | %s | %.2f %.2f" % (diag, obs, " | ".join(row), *SOLPS[(diag, obs)]))
-        pad = 0.15*(xmax - xmin); a.set_xlim(xmin - pad, xmax + pad); a.set_ylim(0, None)
+        a.set_xlim(xmin - pad, xmax + pad); a.set_ylim(0, 1.08*ytop)
         a.axvline(0, color="0.7", lw=0.8); a.set_title(title, fontsize=11)
     for a in axes[-1]: a.set_xlabel("$R^u - R^u_{sep}$ [cm]")
     axes[0, 0].legend(frameon=False, fontsize=8)
     for lab in data:
         m = np.nanmean(np.array(summary[lab]), axis=0)
         print("mean d_j over these %d observables: %s forward %.2f, reversed %.2f | SOLPS-ITER standard %.2f, %.2f" % (len(panels), lab, m[0], m[1], *np.mean(np.array(solps_all), axis=0)))
-    fig.suptitle("TCV-X21: Hermes-3 against the experimental dataset (no drifts, so both field directions are shown)")
+    fig.suptitle("TCV-X21: Hermes-3 against the experimental dataset (both field directions shown)")
     fig.savefig(fig_path, dpi=105, bbox_inches="tight")

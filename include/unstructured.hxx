@@ -59,6 +59,7 @@ public:
   std::vector<BoutReal> B;      ///< Field strength
   std::vector<BoutReal> area;   ///< Poloidal area
   std::vector<BoutReal> bR, bZ; ///< Poloidal components of the unit vector along B
+  std::vector<BoutReal> cellR, cellZ; ///< Cell centre (ghost: face mid-point), normalised
   std::vector<int> prev, next;  ///< Neighbours along the flux tube, or -1
   /// Ghost cell closing the flux tube beyond a cell that has no `prev` / `next`
   /// neighbour, or -1. Used like a guard cell when reconstructing face values.
@@ -83,6 +84,56 @@ public:
   /// Zero on other faces.
   std::vector<BoutReal> wall_perp_area;
 
+  /// Drifts (see flatgrid.py). Empty if the grid file has no drift geometry.
+  /// E x B volume flow from L to R = face_drift * (phi at vertex 2 - vertex 1);
+  /// flux of curl(b/B) from L to R = face_curl. Both include `field_sign`.
+  std::vector<BoutReal> face_drift, face_curl;
+  bool has_drifts{false};   ///< Drift geometry and vertex stencils loaded?
+  BoutReal field_sign{1.0}; ///< -1 reverses the toroidal field
+  bool exb_through_wall{true}; ///< Does the E x B drift carry plasma into the wall?
+  /// Drift fluxes with limited second-order face values (otherwise first-order upwind)?
+  bool drift_second_order{true};
+
+  /// E x B volume flow through every face, from L to R, for the potential
+  /// `phi`. Through wall faces only the flow into the wall is kept
+  /// (none at all if `exb_through_wall` is false).
+  std::vector<BoutReal> flowExB(const Field3D& phi) const;
+  /// Flow of the magnetic drift through every face for a species with
+  /// temperature `T` and charge `charge`: T / charge * curl(b/B) . dS.
+  /// Zero through wall faces.
+  std::vector<BoutReal> flowMagneticDrift(const Field3D& T, BoutReal charge) const;
+  /// Area-weighted mean over the core boundary of the ghost-cell values of a
+  /// gathered field (all processors)
+  BoutReal coreMean(const Buffer& f) const;
+  /// Div(f v) for a given volume flow through each face. On interior faces
+  /// `f` is taken from the upwind side: with `drift_second_order` a limited
+  /// linear reconstruction from the upwind cell (TVD, van Albada limiter),
+  /// otherwise the upwind cell value. Core faces carry the mean of the core
+  /// boundary values, in either direction; wall faces the value of their cell.
+  /// If `boundary_flow` is given, what leaves through each boundary face
+  /// (wall or core) is added to the ghost cell of that face.
+  /// If `weight` is given (one value per face, 0 to 1), the second-order
+  /// face value is blended with the upwind one: weight 0 = upwind.
+  Field3D Div_f_flow(const Field3D& f, const std::vector<BoutReal>& flow,
+                     Field3D* boundary_flow = nullptr,
+                     const std::vector<BoutReal>* weight = nullptr) const;
+  /// Weight of the second-order drift face values: n_f / (n_f + n_blend),
+  /// with n_f the harmonic mean of the densities `n` of the two cells and
+  /// n_blend = drift_second_order_density. In tenuous plasma the drift
+  /// fluxes then fall back to upwind values, which keep an implicit step
+  /// positive (second-order values do not). With drift_second_order_closed_only
+  /// the weight is zero on every face that is not between two cells of
+  /// closed flux tubes.
+  std::vector<BoutReal> secondOrderWeight(const Field3D& n) const;
+  BoutReal drift_second_order_density{0.0}; ///< Normalised; 0 = second order everywhere
+  /// Second-order drift face values only between cells of closed flux tubes?
+  bool drift_second_order_closed_only{true};
+  std::vector<char> closed; ///< Is the cell in a closed flux tube? (local cells, halo included)
+  /// Green-Gauss gradient (R, Z components, per normalised length) of a
+  /// gathered field in every local cell, halo included (communicates).
+  /// Zero in ghost and padding cells. `like` only sets the field's mesh.
+  void cellGradient(const Field3D& like, const Buffer& f, Buffer& gR, Buffer& gZ) const;
+
   /// Skew correction of the cross-field operators (see flatgrid.py): the
   /// gradient at a face also takes the difference of the field between the
   /// two vertices of the face, interpolated from nearby cells.
@@ -91,23 +142,48 @@ public:
   std::vector<BoutReal> vperp, viso; ///< Coefficient of the vertex difference
   std::vector<int> sptr, scell;      ///< Vertex difference as a sum over cells (CSR by face)
   std::vector<BoutReal> sw;
-  /// The correction is kept below this multiple of the two-point term, so that
-  /// the flow between two cells never runs from the lower to the higher value
-  /// (for skew_limit <= 1) and the operator cannot create a new minimum.
+  /// Two-point gradient term plus the bounded vertex correction.
+  /// The correction C is kept below
+  ///     M = skew_limit * sqrt(A^2 + (skew_smooth * trans * h)^2),
+  /// A the two-point term and h a mean of |f| in the two cells. The term in h
+  /// lets a resolved profile (cells smaller than about skew_smooth times its
+  /// gradient length) keep its whole correction, so that the operator stays
+  /// second order; the bound acts only where the profile is under-resolved.
+  /// With the harmonic mean h -> 0 when either cell empties, and then |C| < |A|:
+  /// the flow into an empty cell never reverses (positivity). The bound is
+  /// approached smoothly, C / (1 + |C/M|^p)^(1/p), which Newton iterations need.
+  /// skew_smooth = 0.05, arithmetic mean, p = 2 is the bound of the first version.
+  /// The size h of the field that sets the floor of the bound depends on what it is:
+  enum class Scale {
+    positive,  ///< density, temperature, pressure: harmonic mean of the two cells
+    logarithm, ///< a logarithm: h = 1, a change by a factor e (normalisation independent)
+    signed_    ///< velocity, potential: root-mean-square of the two cells (smooth through 0)
+  };
   BoutReal skew_limit{1.0};
-  /// Two-point gradient term plus the limited vertex correction
-  /// The bound is approached smoothly, which Newton iterations need. For the
-  /// same reason it does not go to zero with the two-point term: a difference
-  /// of `skew_smooth` times the mean size of the field is added in quadrature.
-  BoutReal skew_smooth{0.05};
+  BoutReal skew_smooth{1.0};
+  bool skew_harmonic{true}; ///< false: arithmetic mean of |f| for every field (first version)
+  BoutReal skew_power{2.0};
   BoutReal correctedGradient(BoutReal two_point, BoutReal trans, BoutReal v,
-                             const Buffer& f, int i) const {
-    const BoutReal floor_diff =
-        skew_smooth * 0.5 * (std::abs(f[faceL[i]]) + std::abs(f[faceR[i]])) * trans;
-    const BoutReal bound = skew_limit * std::sqrt(SQ(two_point) + SQ(floor_diff));
+                             const Buffer& f, int i, Scale scale = Scale::positive) const {
+    const BoutReal fa = f[faceL[i]];
+    const BoutReal fb = f[faceR[i]];
+    const BoutReal a = std::abs(fa);
+    const BoutReal b = std::abs(fb);
+    BoutReal h = 0.5 * (a + b);
+    if (skew_harmonic) {
+      h = (scale == Scale::positive)    ? 2.0 * a * b / (a + b + 1e-300)
+          : (scale == Scale::logarithm) ? 1.0
+                                        : std::sqrt(0.5 * (SQ(fa) + SQ(fb)));
+    }
+    const BoutReal bound =
+        skew_limit * std::sqrt(SQ(two_point) + SQ(skew_smooth * h * trans));
     const BoutReal correction = v * vertexDifference(f, i);
-    return two_point
-           + correction * bound / std::sqrt(SQ(bound) + SQ(correction) + 1e-300);
+    if (skew_power == 2.0) {
+      return two_point
+             + correction * bound / std::sqrt(SQ(bound) + SQ(correction) + 1e-300);
+    }
+    const BoutReal r = std::abs(correction) / (bound + 1e-300);
+    return two_point + correction / std::pow(1.0 + std::pow(r, skew_power), 1.0 / skew_power);
   }
   /// Value at vertex 2 minus value at vertex 1 of face `i`
   BoutReal vertexDifference(const Buffer& f, int i) const {
@@ -140,11 +216,17 @@ public:
   /// Radial only by default; `isotropic` includes the poloidal part of Grad_perp.
   /// No flux through wall faces; core faces use the ghost value.
   /// With the skew correction the sign of the whole gradient picks the side.
+  /// If `boundary_flow` is given, the flow out of the plasma through each
+  /// core face is added to its ghost cell. `scale` says what kind of field f is,
+  /// for the bound on the skew correction.
   Field3D Div_a_Grad_perp_upwind(const Field3D& a, const Field3D& f,
-                                 bool isotropic = false) const;
+                                 bool isotropic = false,
+                                 Field3D* boundary_flow = nullptr,
+                                 Scale scale = Scale::positive) const;
   /// Div(a Grad_perp(f)) with the mean of `a` at each face. Includes the
   /// poloidal part of Grad_perp. No flux through wall faces.
-  Field3D Div_a_Grad_perp(const Field3D& a, const Field3D& f) const;
+  Field3D Div_a_Grad_perp(const Field3D& a, const Field3D& f,
+                          Scale scale = Scale::positive) const;
   /// Loss through wall faces with a decay length: the flow out of each cell
   /// next to the wall is a * f * (wall area projected on the flux surface
   /// normal) * inv_length, with `a` and `f` taken in that cell. Returns the

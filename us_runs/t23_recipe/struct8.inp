@@ -1,0 +1,161 @@
+# Solver-recipe tests (t23_recipe): orthogonal grid 32x128 (28 x 128 = 3584 cells; the
+# 32x104 grid with more poloidal cells so that it splits over 8 processes), recipe
+# solver settings (matrix-free operator, Jacobian lagged within a step and
+# re-used across steps, Eisenstat-Walker, atol 1e-6, PID control).
+#
+# TCV-X21 reference case (TCV discharge 65402) on an ORTHOGONAL hypnotoad grid,
+# for comparison with the GOAT-grid case t12_tcvx21 (BOUT.inp.stage1): same
+# binary, same physics settings, structured operators.
+# Uniform D = 0.2 and chi_e = chi_i = 1.0 m^2/s, 160 kW through the core boundary,
+# density 1.2e19 m^-3 held at the core boundary, walls return 99% of ions and
+# absorb 1% of the neutrals that reach them. No drifts, no carbon, fluid atoms.
+#
+# Differences forced by the grid: the radial edges are flux surfaces
+# (psiN = 1.24 and 0.75), not the vessel wall, and the target rows are
+# perpendicular to the flux surfaces, not along the wall.
+power_core = 160e3     # W
+recycle = 0.99
+# 3/2 * source * volume = power: the heating goes into the first cell layer
+# inside the core boundary (0.0182 m^3 on this grid), as on the GOAT grid
+core_layer = H(1/28 - x) * H(y) * H(2*pi - y)   # first cell layer; in BOUT++ the core rows are 0 < y < 2 pi
+core_layer_volume = 0.0182   # m^3
+
+nout = 300
+timestep = 95788      # 1 ms
+MZ = 1
+
+[mesh]
+file = "tcvx21/structured8/tcvx21_32x128.grd.nc"
+extrapolate_y = false
+
+[mesh:paralleltransform]
+type = shifted
+
+[solver]
+type = snes
+pc_type = lu
+max_nonlinear_iterations = 7
+atol = 1e-6
+rtol = 1e-5
+stol = 1e-12
+maxl = 260
+matrix_free_operator = true
+lag_jacobian = 50
+jacobian_reuse = 10        # re-use the Jacobian for up to 10 steps (rebuilt after a failure)
+timestep = 0.1
+max_snes_failures = 30
+scale_vars = true
+timestep_control = pid_nonlinear_its
+target_its = 4
+kP = 0.7
+kI = 0.3
+kD = 0.0
+diagnose = true
+
+[petsc]
+snes_type = newtonls
+ksp_type = fgmres
+pc_factor_mat_solver_type = mumps
+snes_linesearch_type = basic
+snes_ksp_ew
+
+[hermes]
+components = (d+, d, e, sheath_boundary_simple, braginskii_collisions,
+              braginskii_friction, braginskii_heat_exchange, braginskii_thermal_force,
+              reactions, electron_force_balance, braginskii_conduction, recycling)
+Nnorm = 1e19
+Bnorm = 1
+Tnorm = 50
+
+[sheath_boundary_simple]
+diagnose = true
+gamma_i = 2.5
+gamma_e = 4.5
+density_boundary_mode = 0
+temperature_boundary_mode = 0
+pressure_boundary_mode = 0
+
+[d+]
+type = evolve_density, evolve_momentum, evolve_pressure, anomalous_diffusion
+diagnose = true
+AA = 2
+charge = 1
+recycle_as = d
+target_recycle = true
+target_recycle_multiplier = recycle
+sol_recycle = true
+sol_recycle_multiplier = recycle
+pfr_recycle = true
+pfr_recycle_multiplier = recycle
+neutral_pump = true                  # is_pump = 1 on every radial edge cell of the grid file
+pump_recycle_multiplier = recycle
+anomalous_D = 0.2
+anomalous_chi = 1.0
+thermal_conduction = true
+kappa_limit_alpha = -1
+
+[Nd+]
+function = 0.5
+bndry_core = dirichlet(1.2)     # 1.2e19 m^-3
+bndry_all = neumann
+
+[Pd+]
+function = 0.5 * 0.4
+bndry_all = neumann
+source = 0.5 * power_core / (1.5 * core_layer_volume) * core_layer   # Pa/s
+
+[NVd+]
+function = 0
+bndry_all = neumann
+
+[d]
+type = neutral_mixed, neutral_boundary
+AA = 2
+evolve_momentum = true
+flux_limit = 0.2
+lag_limiter_gradient = true
+diagnose = true
+neutral_boundary_sol = true
+neutral_boundary_pfr = true
+
+[Nd]
+function = 0.001     # 1e16 m^-3
+bndry_all = neumann
+
+[Pd]
+function = 0.001 * 0.06   # 3 eV
+bndry_all = neumann
+
+[NVd]
+function = 0
+bndry_all = neumann
+
+[e]
+type = quasineutral, evolve_pressure, zero_current, anomalous_diffusion
+diagnose = true
+AA = 1/1836
+charge = -1
+anomalous_D = 0.2
+anomalous_chi = 1.0
+thermal_conduction = true
+kappa_limit_alpha = -1
+
+[Pe]
+function = 0.5 * 0.4
+bndry_all = neumann
+source = 0.5 * power_core / (1.5 * core_layer_volume) * core_layer   # Pa/s
+
+[braginskii_collisions]
+electron_neutral = false
+ion_neutral = false
+neutral_neutral = false
+
+[recycling]
+species = d+
+
+[reactions]
+type = (
+        d + e -> d+ + 2e,   # Deuterium ionisation
+        d+ + e -> d,        # Deuterium recombination
+        d + d+ -> d+ + d,   # Deuterium charge exchange
+       )

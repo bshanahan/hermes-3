@@ -23,7 +23,7 @@ def numbers(run):
     d = c.load(run); r, g, n = d["r"], d["g"], d["n"]
     twopi = 2*np.pi
     psin = d["psin"][:n]
-    omp = np.flatnonzero((np.abs(g["Z"][:n]) < 0.012) & (g["R"][:n] > c.q["rmagx"])); omp = omp[np.argsort(psin[omp])]
+    omp = c.midplane_cells(g, n); omp = omp[np.argsort(psin[omp])]
     x = c.rsep_of_psin(psin[omp])
     sep = lambda a: float(np.interp(0.0, x, a[omp]))
     out = {"time [ms]": 1e3*float(d["t"]),

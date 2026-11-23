@@ -36,6 +36,7 @@ struct WallSputtering : public NamedComponent<WallSputtering> {
   WallSputtering(std::string name, Options& alloptions, Solver*)
       : NamedComponent(name, {readOnly("species:{from}:{inputs}"),
                               readIfSet("species:{from}:{optional}"),
+                              readIfSet("species:{sp}:{sp_inputs}"),
                               readWrite("species:{sp}:{outputs}")}) {
     if (!Unstructured::active()) {
       throw BoutException("wall_sputtering needs a flat-cell (unstructured) grid");
@@ -63,6 +64,12 @@ struct WallSputtering : public NamedComponent<WallSputtering> {
                  .doc("Energy of each released atom [eV]")
                  .withDefault<BoutReal>(1.0)
              / Tnorm;
+    wall_normal_launch =
+        options["wall_normal_launch"]
+            .doc("Give the released atoms momentum along the wall normal? Only its "
+                 "component along the magnetic field is used, and only if the "
+                 "sputtered species evolves its momentum")
+            .withDefault<bool>(true);
     diagnose = options["diagnose"]
                    .doc("Output additional diagnostics?")
                    .withDefault<bool>(false);
@@ -81,8 +88,15 @@ struct WallSputtering : public NamedComponent<WallSputtering> {
     substitutePermissions("sp", {species});
     substitutePermissions("from", from);
     substitutePermissions("inputs", {"AA", "density", "temperature"});
-    substitutePermissions("optional", {"velocity", "charge", "wall_loss_flow"});
-    substitutePermissions("outputs", {"density_source", "energy_source"});
+    substitutePermissions("optional",
+                          {"velocity", "charge", "wall_loss_flow", "wall_drift_flow"});
+    substitutePermissions("sp_inputs", {"AA"});
+    if (wall_normal_launch) {
+      substitutePermissions("outputs",
+                            {"density_source", "energy_source", "momentum_source"});
+    } else {
+      substitutePermissions("outputs", {"density_source", "energy_source"});
+    }
   };
 
   void outputVars(Options& state) override {
@@ -105,6 +119,7 @@ private:
   BoutReal yield;
   BoutReal energy; ///< Energy per released atom, normalised
   bool diagnose;
+  bool wall_normal_launch;
   std::vector<bool> active_face;
   Field3D particle_source; ///< Normalised particle source
 
@@ -112,6 +127,9 @@ private:
     const auto& us = Unstructured::get();
     particle_source = 0.0;
     particle_source.allocate();
+    // Source per unit volume times b . (normal into the plasma)
+    Field3D directed_source{0.0};
+    directed_source.allocate();
     for (const auto& name : from) {
       auto sp = state["species"][name];
       const Field3D N = get<Field3D>(sp["density"]);
@@ -122,6 +140,9 @@ private:
       const Field3D V = has_velocity ? get<Field3D>(sp["velocity"]) : Field3D{0.0};
       const bool has_loss = ion and sp.isSet("wall_loss_flow");
       const Field3D loss = has_loss ? get<Field3D>(sp["wall_loss_flow"]) : Field3D{0.0};
+      // Ions that the E x B drift carries into the wall (drifts_unstructured)
+      const bool has_drift = ion and sp.isSet("wall_drift_flow");
+      const Field3D drift = has_drift ? get<Field3D>(sp["wall_drift_flow"]) : Field3D{0.0};
       for (int f = 0; f < us.nfaces; f++) {
         if (!active_face[f]) {
           continue;
@@ -138,17 +159,30 @@ private:
           if (has_loss) {
             flow += loss(0, g, 0);
           }
+          if (has_drift) {
+            flow += drift(0, g, 0);
+          }
         } else {
           const BoutReal tn = std::max(T(0, i, 0), 0.0);
           flow = 0.25 * sqrt(8 * tn / (PI * AA)) * std::max(N(0, i, 0), 0.0)
                  * us.face_area[f];
         }
         particle_source(0, i, 0) += yield * flow / us.vol[c];
+        // b . (normal into the plasma) = -flux / (B * area)
+        directed_source(0, i, 0) -=
+            yield * flow / us.vol[c] * us.flux_over_B[f] / us.face_area[f];
       }
     }
     auto to = state["species"][species];
     add(to["density_source"], particle_source);
     add(to["energy_source"], energy * particle_source);
+    if (wall_normal_launch and to.isSet("AA")) {
+      // Mean wall-normal speed of a cosine distribution at the release energy,
+      // as for recycled atoms
+      const BoutReal AAsp = get<BoutReal>(to["AA"]);
+      add(to["momentum_source"],
+          AAsp * (2. / 3) * sqrt(2. * energy / AAsp) * directed_source);
+    }
   };
 };
 

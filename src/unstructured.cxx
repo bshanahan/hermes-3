@@ -61,6 +61,25 @@ std::vector<T> pick(const std::vector<T>& all, const std::vector<int>& which) {
   return result;
 }
 
+/// Value at a face seen from the upwind cell C, with a TVD limiter on an
+/// unstructured grid (Darwish and Moukalled, Numer. Heat Transfer B 44, 2003):
+/// the upwind-side difference a = 2 grad(f)_C . d_CD - (f_D - f_C) and the
+/// downwind difference b = f_D - f_C are combined with van Albada's limiter,
+/// f_face = f_C + s/2 with s = ab(a + b)/(a^2 + b^2) where ab > 0, else 0.
+/// The switch at ab = 0 is smoothed so that Newton iterations see a
+/// differentiable function. For a linear field s = b (the face mid-value);
+/// s/b <= 1.21, so the face value stays between f_C and f_D.
+inline BoutReal limitedFaceValue(BoutReal fc, BoutReal fd, BoutReal two_g_dot_d) {
+  const BoutReal b = fd - fc;
+  const BoutReal a = two_g_dot_d - b;
+  const BoutReal scale = 1e-6 * (std::abs(fc) + std::abs(fd)) + 1e-300;
+  const BoutReal ab = a * b;
+  const BoutReal positive = 0.5 * (ab + std::sqrt(SQ(ab) + SQ(SQ(scale))));
+  // (the last term keeps the denominator above zero when f_C = f_D = 0, where
+  // SQ(scale) underflows)
+  return fc + 0.5 * positive * (a + b) / (SQ(a) + SQ(b) + SQ(scale) + 1e-300);
+}
+
 /// Value of a reconstructed field on the side of a cell given by `side`
 inline BoutReal faceValue(int side, BoutReal centre, BoutReal at_prev, BoutReal at_next) {
   return (side > 0) ? at_next : ((side < 0) ? at_prev : centre);
@@ -119,6 +138,8 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   const auto all_area = getReals(mesh, "us_area", ncells, L * L);
   const auto all_bR = getReals(mesh, "us_bR", ncells, 1.0);
   const auto all_bZ = getReals(mesh, "us_bZ", ncells, 1.0);
+  const auto all_cellR = getReals(mesh, "us_R", ncells, L);
+  const auto all_cellZ = getReals(mesh, "us_Z", ncells, L);
   const auto all_prev = getInts(mesh, "us_prev", ncells);
   const auto all_next = getInts(mesh, "us_next", ncells);
   const auto all_kind = getInts(mesh, "us_kind", ncells);
@@ -180,16 +201,32 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   us.skew_limit =
       Options::root()["unstructured"]["skew_limit"]
           .doc("Largest size of the skew correction at a face, as a multiple of the "
-               "two-point term. Values up to 1 keep the flow between two cells "
-               "running from the higher to the lower value")
+               "two-point term (where the profile is under-resolved). Values up to 1 "
+               "keep the flow into an empty cell from reversing")
           .withDefault<BoutReal>(1.0);
   us.skew_smooth =
       Options::root()["unstructured"]["skew_smooth"]
-          .doc("Smoothing of the bound on the skew correction: this fraction of the "
-               "mean size of the field counts as a difference between the two cells. "
-               "Without it the bound has a kink wherever two cells hold the same "
-               "value, and the implicit solver takes very small steps")
-          .withDefault<BoutReal>(0.05);
+          .doc("The bound on the skew correction is at least this fraction of the "
+               "field (mean of the two cells) times the transmissibility. Of order 1, "
+               "it leaves the correction of resolved profiles untouched (second "
+               "order); the first version used 0.05 with the arithmetic mean")
+          .withDefault<BoutReal>(1.0);
+  us.skew_harmonic =
+      Options::root()["unstructured"]["skew_harmonic_mean"]
+          .doc("Size of the field for skew_smooth by kind of field: harmonic mean of "
+               "|f| for densities, temperatures and pressures (goes to zero when either "
+               "cell empties, which keeps them positive), 1 for logarithms, root mean "
+               "square for velocities and potentials? Otherwise the arithmetic mean of "
+               "|f| for every field (first version; depends on the normalisation for "
+               "logarithms)")
+          .withDefault<bool>(true);
+  us.skew_power =
+      Options::root()["unstructured"]["skew_bound_power"]
+          .doc("Sharpness p of the bound on the skew correction, C/(1+|C/M|^p)^(1/p)")
+          .withDefault<BoutReal>(2.0);
+  if (us.skew_power <= 0.0) {
+    throw BoutException("unstructured:skew_bound_power must be positive");
+  }
   if (us.skew_correction and !has_stencils) {
     throw BoutException("unstructured:skew_correction needs a grid file with vertex "
                         "stencils (us_face_sptr). Regenerate the grid");
@@ -197,7 +234,42 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   std::vector<int> all_sptr(nfaces + 1, 0);
   std::vector<int> all_scell;
   std::vector<BoutReal> all_sw;
-  if (us.skew_correction) {
+  us.has_drifts = has_stencils and mesh->sourceHasVar("us_face_drift");
+  us.drift_second_order =
+      Options::root()["unstructured"]["drift_second_order"]
+          .doc("Drift fluxes with limited second-order face values? First-order "
+               "upwind values add a numerical cross-field diffusion of about "
+               "|v_drift| * (cell size) / 2")
+          .withDefault<bool>(true);
+  us.drift_second_order_closed_only =
+      Options::root()["unstructured"]["drift_second_order_closed_only"]
+          .doc("Use second-order drift face values only between cells of closed flux "
+               "tubes (upwind values in the SOL and the divertor)? Most of the "
+               "numerical diffusion that matters is across closed flux surfaces, and "
+               "second-order values in the tenuous far SOL stall the implicit solver")
+          .withDefault<bool>(true);
+  // Normalised by Nnorm: read here in m^-3, divided below
+  us.drift_second_order_density =
+      Options::root()["unstructured"]["drift_second_order_density"]
+          .doc("Density [m^-3] below which the drift fluxes fall back from second-order "
+               "to upwind face values (weight n/(n + this)). Second-order values do not "
+               "keep an implicit step positive, and in the tenuous far SOL they let "
+               "cells drain. 0: second order everywhere")
+          .withDefault<BoutReal>(1e17)
+      / Options::root()["hermes"]["Nnorm"].withDefault<BoutReal>(1e19);
+  us.exb_through_wall =
+      Options::root()["unstructured"]["exb_through_wall"]
+          .doc("Does the E x B drift carry plasma into the wall? If not, no drift "
+               "flow crosses a wall face and the plasma it brings can only leave "
+               "along the field. Needs a grid file written with vertex stencils "
+               "for the wall faces")
+          .withDefault<bool>(true);
+  us.field_sign =
+      Options::root()["unstructured"]["field_sign"]
+          .doc("Sign of the toroidal field in the drifts: -1 reverses the field "
+               "relative to the grid file. Parallel transport is not affected")
+          .withDefault<BoutReal>(1.0);
+  if (us.skew_correction or us.has_drifts) {
     all_sptr = getInts(mesh, "us_face_sptr", nfaces + 1);
     all_scell = getInts(mesh, "us_face_scell", all_sptr[nfaces]);
     all_sw = getReals(mesh, "us_face_sw", all_sptr[nfaces], 1.0);
@@ -295,7 +367,28 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   us.area = pick(all_area, cells);
   us.bR = pick(all_bR, cells);
   us.bZ = pick(all_bZ, cells);
+  us.cellR = pick(all_cellR, cells);
+  us.cellZ = pick(all_cellZ, cells);
   us.kind = pick(all_kind, cells);
+  {
+    // Closed flux tubes: every cell has a neighbour on both sides
+    const auto all_tube = getInts(mesh, "us_tube", ncells);
+    int ntubes = 0;
+    for (int c = 0; c < ncells; c++) {
+      ntubes = std::max(ntubes, all_tube[c] + 1);
+    }
+    std::vector<char> tube_closed(ntubes, 1);
+    for (int c = 0; c < ncells; c++) {
+      if (all_kind[c] == interior and (all_prev[c] < 0 or all_next[c] < 0)) {
+        tube_closed[all_tube[c]] = 0;
+      }
+    }
+    us.closed.assign(us.nall, 0);
+    for (int c = 0; c < us.nall; c++) {
+      const int t = all_tube[cells[c]];
+      us.closed[c] = (all_kind[cells[c]] == interior and t >= 0) ? tube_closed[t] : 0;
+    }
+  }
   us.prev = toLocal(all_prev);
   us.next = toLocal(all_next);
   us.ghost_prev = toLocal(all_ghost_prev);
@@ -327,7 +420,15 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
   us.flux_over_B = pick(getReals(mesh, "us_face_flux", nfaces, L * L), faces);
   const auto faceB = pick(getReals(mesh, "us_face_B", nfaces, 1.0), faces);
   const auto faceBp = pick(getReals(mesh, "us_face_Bp", nfaces, 1.0), faces);
-  if (us.skew_correction) {
+  if (us.has_drifts) {
+    us.face_drift = pick(getReals(mesh, "us_face_drift", nfaces, L / Bnorm), faces);
+    us.face_curl = pick(getReals(mesh, "us_face_curl", nfaces, L / Bnorm), faces);
+    for (int i = 0; i < us.nfaces; i++) {
+      us.face_drift[i] *= us.field_sign;
+      us.face_curl[i] *= us.field_sign;
+    }
+  }
+  if (us.skew_correction or us.has_drifts) {
     us.vperp = pick(getReals(mesh, "us_face_vperp", nfaces, L), faces);
     us.viso = pick(getReals(mesh, "us_face_viso", nfaces, L), faces);
     us.sptr.assign(1, 0);
@@ -388,9 +489,10 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
 
   output.write("Unstructured grid: {} cells, {} ghost cells, {} faces in total; "
                "{} cells, {} halo cells and {} faces on this processor. "
-               "Skew correction {}\n",
+               "Skew correction {} (bound: limit {}, smooth {}, {} scale, power {})\n",
                nreal, nghost, nfaces, us.nlocal, halo.size(), us.nfaces,
-               us.skew_correction ? "on" : "off");
+               us.skew_correction ? "on" : "off", us.skew_limit, us.skew_smooth,
+               us.skew_harmonic ? "per-field" : "arithmetic", us.skew_power);
   instance = std::move(us);
 }
 
@@ -608,7 +710,8 @@ Field3D Unstructured::Div_par_K_Grad_par(const Field3D& K_in, const Field3D& f_i
 }
 
 Field3D Unstructured::Div_a_Grad_perp_upwind(const Field3D& a_in, const Field3D& f_in,
-                                             bool isotropic) const {
+                                             bool isotropic, Field3D* boundary_flow,
+                                             Scale scale) const {
   Field3D result{zeroFrom(f_in)};
   const Buffer a = gather(a_in);
   const Buffer f = gather(f_in);
@@ -621,12 +724,16 @@ Field3D Unstructured::Div_a_Grad_perp_upwind(const Field3D& a_in, const Field3D&
     const int R = faceR[i];
     BoutReal gradient = trans[i] * (f[R] - f[L]);
     if (skew_correction) {
-      gradient = correctedGradient(gradient, trans[i], isotropic ? viso[i] : vperp[i], f, i);
+      gradient = correctedGradient(gradient, trans[i], isotropic ? viso[i] : vperp[i], f, i,
+                                   scale);
     }
     // Flow is from high to low f: coefficient from the cell it leaves
     const BoutReal flow = gradient * ((gradient > 0) ? a[R] : a[L]); // Into L
     if (L < nlocal) {
       result(0, ys + L, 0) += flow / vol[L];
+    }
+    if (boundary_flow != nullptr and face_kind[i] != interior) {
+      (*boundary_flow)(0, ys + R, 0) -= flow; // Out of the plasma; both cells owned here
     }
     if (face_kind[i] == interior and R < nlocal) {
       result(0, ys + R, 0) -= flow / vol[R];
@@ -635,7 +742,8 @@ Field3D Unstructured::Div_a_Grad_perp_upwind(const Field3D& a_in, const Field3D&
   return result;
 }
 
-Field3D Unstructured::Div_a_Grad_perp(const Field3D& a_in, const Field3D& f_in) const {
+Field3D Unstructured::Div_a_Grad_perp(const Field3D& a_in, const Field3D& f_in,
+                                      Scale scale) const {
   Field3D result{zeroFrom(f_in)};
   const Buffer a = gather(a_in);
   const Buffer f = gather(f_in);
@@ -647,7 +755,7 @@ Field3D Unstructured::Div_a_Grad_perp(const Field3D& a_in, const Field3D& f_in) 
     const int R = faceR[i];
     BoutReal gradient = tiso[i] * (f[R] - f[L]);
     if (skew_correction_mean) {
-      gradient = correctedGradient(gradient, tiso[i], viso[i], f, i);
+      gradient = correctedGradient(gradient, tiso[i], viso[i], f, i, scale);
     }
     const BoutReal flow = 0.5 * (a[L] + a[R]) * gradient; // Into L
     if (L < nlocal) {
@@ -655,6 +763,169 @@ Field3D Unstructured::Div_a_Grad_perp(const Field3D& a_in, const Field3D& f_in) 
     }
     if (face_kind[i] == interior and R < nlocal) {
       result(0, ys + R, 0) -= flow / vol[R];
+    }
+  }
+  return result;
+}
+
+std::vector<BoutReal> Unstructured::flowExB(const Field3D& phi_in) const {
+  if (!has_drifts) {
+    throw BoutException("Unstructured grid: the grid file has no drift geometry "
+                        "(us_face_drift). Regenerate the grid");
+  }
+  const Buffer phi = gather(phi_in);
+  std::vector<BoutReal> flow(nfaces, 0.0);
+  for (int i = 0; i < nfaces; i++) {
+    flow[i] = face_drift[i] * vertexDifference(phi, i);
+    if (face_kind[i] == wall) {
+      // Plasma drifts into the wall but nothing drifts out of it. The cut-off
+      // is smooth, with the same width as the upwind switch in Div_f_flow.
+      const BoutReal width = 1e-3 * std::abs(face_drift[i]);
+      flow[i] = exb_through_wall ? 0.5 * (flow[i] + std::sqrt(SQ(flow[i]) + SQ(width)))
+                                 : 0.0;
+    }
+  }
+  return flow;
+}
+
+BoutReal Unstructured::coreMean(const Buffer& f) const {
+  // Core faces and their ghost cells are owned by one processor each
+  BoutReal local[2] = {0.0, 0.0};
+  for (int i = 0; i < nfaces; i++) {
+    if (face_kind[i] == core and faceL[i] < nlocal) {
+      local[0] += face_area[i] * f[faceR[i]];
+      local[1] += face_area[i];
+    }
+  }
+  BoutReal global[2] = {0.0, 0.0};
+  MPI_Allreduce(local, global, 2, MPI_DOUBLE, MPI_SUM, BoutComm::get());
+  return (global[1] > 0.0) ? global[0] / global[1] : 0.0;
+}
+
+std::vector<BoutReal> Unstructured::flowMagneticDrift(const Field3D& T_in,
+                                                      BoutReal charge) const {
+  if (!has_drifts) {
+    throw BoutException("Unstructured grid: the grid file has no drift geometry "
+                        "(us_face_curl). Regenerate the grid");
+  }
+  const Buffer T = gather(T_in);
+  const BoutReal Tcore = coreMean(T);
+  std::vector<BoutReal> flow(nfaces, 0.0);
+  for (int i = 0; i < nfaces; i++) {
+    if (face_kind[i] == wall) {
+      continue;
+    }
+    const BoutReal Tface =
+        (face_kind[i] == interior) ? 0.5 * (T[faceL[i]] + T[faceR[i]]) : Tcore;
+    flow[i] = Tface * face_curl[i] / charge;
+  }
+  return flow;
+}
+
+void Unstructured::cellGradient(const Field3D& like, const Buffer& f, Buffer& gR,
+                                Buffer& gZ) const {
+  Buffer sR(nall, 0.0), sZ(nall, 0.0);
+  for (int i = 0; i < nfaces; i++) {
+    const int L = faceL[i];
+    const int R = faceR[i];
+    const bool boundary = face_kind[i] != interior;
+    const BoutReal face_value = boundary ? f[R] : 0.5 * (f[L] + f[R]);
+    sR[L] += face_value * nR[i] * face_length[i];
+    sZ[L] += face_value * nZ[i] * face_length[i];
+    if (!boundary) {
+      sR[R] -= face_value * nR[i] * face_length[i];
+      sZ[R] -= face_value * nZ[i] * face_length[i];
+    }
+  }
+  Field3D fR{zeroFrom(like)}, fZ{zeroFrom(like)};
+  for (int c = 0; c < nlocal; c++) {
+    if (kind[c] == interior) {
+      fR(0, ys + c, 0) = sR[c] / area[c];
+      fZ(0, ys + c, 0) = sZ[c] / area[c];
+    }
+  }
+  gR = gather(fR);
+  gZ = gather(fZ);
+}
+
+std::vector<BoutReal> Unstructured::secondOrderWeight(const Field3D& n_in) const {
+  std::vector<BoutReal> weight(nfaces, 1.0);
+  if (drift_second_order_closed_only) {
+    for (int i = 0; i < nfaces; i++) {
+      if (closed[faceL[i]] == 0 or closed[faceR[i]] == 0) {
+        weight[i] = 0.0;
+      }
+    }
+  }
+  if (drift_second_order_density <= 0.0) {
+    return weight;
+  }
+  const Buffer n = gather(n_in);
+  for (int i = 0; i < nfaces; i++) {
+    if (weight[i] == 0.0) {
+      continue;
+    }
+    const BoutReal nL = std::max(n[faceL[i]], 0.0);
+    const BoutReal nR = std::max(n[faceR[i]], 0.0);
+    const BoutReal nf = 2.0 * nL * nR / (nL + nR + 1e-300);
+    weight[i] *= nf / (nf + drift_second_order_density);
+  }
+  return weight;
+}
+
+Field3D Unstructured::Div_f_flow(const Field3D& f_in, const std::vector<BoutReal>& flow,
+                                 Field3D* boundary_flow,
+                                 const std::vector<BoutReal>* weight) const {
+  Field3D result{zeroFrom(f_in)};
+  const Buffer f = gather(f_in);
+  const BoutReal fcore = coreMean(f);
+  Buffer gR, gZ;
+  if (drift_second_order) {
+    cellGradient(f_in, f, gR, gZ);
+  }
+  for (int i = 0; i < nfaces; i++) {
+    if (flow[i] == 0.0) {
+      continue;
+    }
+    const int L = faceL[i];
+    const int R = faceR[i];
+    // From L to R. Every core face carries the mean of the boundary values,
+    // for flow in either direction. The core boundary is a flux surface: with
+    // one value on it the magnetic drifts take as much out as they bring in,
+    // so that no net current or particle flow crosses it. (Upwinding, or the
+    // local boundary values, let a net current through, which the potential
+    // can only balance with an enormous radial electric field.)
+    // Upwind value, switching side smoothly where the flow reverses: a sharp
+    // switch stalls the Newton iterations of the implicit solver. The width of
+    // the switch is the flow of a potential difference of 1e-3 (normalised)
+    // between the vertices of the face.
+    const BoutReal width = 1e-3 * std::abs(face_drift[i]);
+    const BoutReal wL = 0.5 * (1.0 + flow[i] / std::sqrt(SQ(flow[i]) + SQ(width)));
+    BoutReal value;
+    if (face_kind[i] == core) {
+      value = fcore;
+    } else if (face_kind[i] == wall) {
+      value = f[L]; // Flow through a wall face is outwards: the cell's value
+    } else if (drift_second_order) {
+      const BoutReal dR = cellR[R] - cellR[L];
+      const BoutReal dZ = cellZ[R] - cellZ[L];
+      const BoutReal fromL = limitedFaceValue(f[L], f[R], 2.0 * (gR[L] * dR + gZ[L] * dZ));
+      const BoutReal fromR = limitedFaceValue(f[R], f[L], -2.0 * (gR[R] * dR + gZ[R] * dZ));
+      const BoutReal upwind = wL * f[L] + (1.0 - wL) * f[R];
+      const BoutReal second = wL * fromL + (1.0 - wL) * fromR;
+      value = (weight == nullptr) ? second : upwind + (*weight)[i] * (second - upwind);
+    } else {
+      value = wL * f[L] + (1.0 - wL) * f[R];
+    }
+    const BoutReal out = flow[i] * value;
+    if (face_kind[i] != interior and boundary_flow != nullptr) {
+      (*boundary_flow)(0, ys + R, 0) += out; // A boundary face and its cells are owned here
+    }
+    if (L < nlocal) {
+      result(0, ys + L, 0) += out / vol[L];
+    }
+    if (face_kind[i] == interior and R < nlocal) {
+      result(0, ys + R, 0) -= out / vol[R];
     }
   }
   return result;

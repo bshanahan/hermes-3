@@ -1,0 +1,259 @@
+# RERUN WITH THE CORE BOUNDARY FIXES of 2026-11-19 (zero-gradient temperature; core_power is the
+# total power through the boundary, as SOLPS-ITER), from the state of t15_tcvx21_carbon_continued
+# TCV-X21 reference case (TCV discharge 65402, lower single null Ohmic L-mode)
+# on a GOAT grid, with the inputs of the SOLPS-ITER "standard" case of
+# Wang et al., Nucl. Fusion 64 (2024) 056040: no drifts, uniform D = 0.2 and
+# chi_e = chi_i = 1.0 m^2/s, 160 kW through the core boundary, recycling
+# coefficient 0.99, D2 puff of 6.8e19 molecules/s from the top of the vessel.
+# Differences from that case: fluid atoms instead of EIRENE.
+# WITH CARBON: every wall face releases `carbon_yield` carbon atoms per deuterium ion or
+# atom that reaches it (chemical sputtering, as in the SOLPS-ITER case). Charge states up
+# to C4+ are followed (the edge is below 100 eV); they share the deuterium ion temperature. Carbon that reaches
+# the wall stays there.
+power_core = 160e3     # W
+recycle = 0.99         # walls return this fraction of ions; neutrals are absorbed with 1 - this
+carbon_yield = 0.035
+puff_rate = 0          # atoms/s. Stage 2 uses 1.36e20 (= 6.8e19 D2 molecules/s)
+
+nout = 40
+timestep = 95788      # 1 ms
+MXG = 0
+MZ = 1
+
+[mesh]
+file = "grids/tcvx21_goat_drifts.grd.nc"   # same cells as tcvx21_goat.grd.nc
+
+[solver]
+type = snes
+pc_type = lu
+max_nonlinear_iterations = 7
+atol = 1e-6
+rtol = 1e-5
+stol = 1e-12
+maxl = 260
+matrix_free_operator = true
+lag_jacobian = 50
+timestep = 0.1
+max_snes_failures = 30
+scale_vars = true
+timestep_control = pid_nonlinear_its
+target_its = 4
+kP = 0.7
+kI = 0.3
+kD = 0.0
+diagnose = true
+
+[petsc]
+snes_type = newtonls
+ksp_type = fgmres
+pc_factor_mat_solver_type = mumps
+snes_linesearch_type = basic
+snes_ksp_ew
+
+[hermes]
+components = (d+, d, c, c+, c+2, c+3, c+4, e, sheath_boundary_unstructured, braginskii_collisions,
+              braginskii_friction, braginskii_heat_exchange, braginskii_thermal_force,
+              reactions, electron_force_balance, braginskii_conduction, recycling,
+              puff_d, sputter_c)
+Nnorm = 1e19
+Bnorm = 1
+Tnorm = 50
+
+[sheath_boundary_unstructured]
+diagnose = true
+gamma_i = 2.5
+gamma_e = 4.5
+
+[d+]
+type = evolve_density, evolve_momentum, evolve_pressure, anomalous_diffusion
+diagnose = true
+AA = 2
+charge = 1
+recycle_as = d
+target_recycle = true
+target_recycle_multiplier = recycle
+neutral_pump = true                  # every wall face is in the pump box below
+pump_recycle_multiplier = recycle
+anomalous_D = 0.2
+anomalous_chi = 1.0
+thermal_conduction = true
+kappa_limit_alpha = -1
+core_power = 0.5 * power_core
+core_density = 1.2e19     # m^-3, STAGE 1 ONLY: removed in stage 2, where the puff sets the density
+
+[Nd+]
+function = 0.5
+bndry_all = neumann
+
+[Pd+]
+function = 0.5 * 0.4
+bndry_all = neumann
+
+[NVd+]
+function = 0
+bndry_all = neumann
+
+[d]
+type = neutral_mixed, neutral_boundary
+AA = 2
+evolve_momentum = true
+flux_limit = 0.2
+lag_limiter_gradient = true
+diagnose = true
+
+[Nd]
+function = 0.001     # 1e16 m^-3
+bndry_all = neumann
+
+[Pd]
+function = 0.001 * 0.06   # 3 eV
+bndry_all = neumann
+
+[NVd]
+function = 0
+bndry_all = neumann
+
+[c]
+type = neutral_mixed
+AA = 12
+evolve_momentum = false
+flux_limit = 0.2
+lag_limiter_gradient = true
+diagnose = true
+
+[Nc]
+function = 1e-6      # 1e13 m^-3
+bndry_all = neumann
+
+[Pc]
+function = 1e-6 * 0.02
+bndry_all = neumann
+
+[c+]
+type = evolve_density, evolve_momentum, set_temperature, anomalous_diffusion
+AA = 12
+charge = 1
+temperature_from = d+
+anomalous_D = 0.2
+diagnose = true
+# Carbon ions are not recycled, and carbon atoms that reach the wall are absorbed
+recycle_as = c
+target_recycle = true
+target_recycle_multiplier = 0
+neutral_pump = true
+pump_recycle_multiplier = 0
+
+[Nc+]
+function = 1e-6
+bndry_all = neumann
+
+[NVc+]
+function = 0
+bndry_all = neumann
+
+[c+2]
+type = evolve_density, evolve_momentum, set_temperature, anomalous_diffusion
+AA = 12
+charge = 2
+temperature_from = d+
+anomalous_D = 0.2
+diagnose = true
+
+[Nc+2]
+function = 1e-6
+bndry_all = neumann
+
+[NVc+2]
+function = 0
+bndry_all = neumann
+
+[c+3]
+type = evolve_density, evolve_momentum, set_temperature, anomalous_diffusion
+AA = 12
+charge = 3
+temperature_from = d+
+anomalous_D = 0.2
+diagnose = true
+
+[Nc+3]
+function = 1e-6
+bndry_all = neumann
+
+[NVc+3]
+function = 0
+bndry_all = neumann
+
+[c+4]
+type = evolve_density, evolve_momentum, set_temperature, anomalous_diffusion
+AA = 12
+charge = 4
+temperature_from = d+
+anomalous_D = 0.2
+diagnose = true
+
+[Nc+4]
+function = 1e-6
+bndry_all = neumann
+
+[NVc+4]
+function = 0
+bndry_all = neumann
+
+
+
+[sputter_c]
+type = wall_sputtering
+species = c
+from = d+              # "d+, d" also counts the atoms that reach the wall
+yield = carbon_yield
+energy = 1          # eV per released atom
+diagnose = true
+
+[e]
+type = quasineutral, evolve_pressure, zero_current, anomalous_diffusion
+diagnose = true
+AA = 1/1836
+charge = -1
+anomalous_D = 0.2
+anomalous_chi = 1.0
+thermal_conduction = true
+kappa_limit_alpha = -1
+core_power = 0.5 * power_core
+
+[Pe]
+function = 0.5 * 0.4
+bndry_all = neumann
+
+[braginskii_collisions]
+electron_neutral = false
+ion_neutral = false
+neutral_neutral = false
+
+[recycling]
+species = d+, c+
+# The whole wall absorbs 1 - recycle of what reaches it (Rmin, Rmax, Zmin, Zmax in m)
+pump_boxes = "0.5, 1.3, -0.9, 0.9"
+
+[puff_d]
+type = wall_puff
+species = d
+# Top of the vessel. The paper says "top gas fueling valve"; the radius is my choice
+locations = "0.88, 0.75"
+total_rate = puff_rate
+diagnose = true
+
+[reactions]
+diagnose = true
+type = (
+        d + e -> d+ + 2e,   # Deuterium ionisation
+        d+ + e -> d,        # Deuterium recombination
+        d + d+ -> d+ + d,   # Deuterium charge exchange
+        c + e -> c+ + 2e,
+        c+ + e -> c+2 + 2e,
+        c+2 + e -> c+3 + 2e,
+        c+3 + e -> c+4 + 2e,
+        c+ + e -> c,
+        c+2 + e -> c+,
+        c+3 + e -> c+2,
+        c+4 + e -> c+3,
+       )

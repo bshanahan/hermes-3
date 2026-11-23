@@ -187,13 +187,14 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
   }
   // Unstructured grids: ions lost across the field to the wall
   setPermissions(readIfSet("species:{from}:wall_loss_flow"));
+  setPermissions(readIfSet("species:{from}:wall_drift_flow"));
   substitutePermissions("to",
                         std::vector<std::string>(to_species.begin(), to_species.end()));
   substitutePermissions(
       "from", std::vector<std::string>(from_species.begin(), from_species.end()));
-  substitutePermissions("to_inputs", {"AA", "density", "pressure", "temperature"});
   substitutePermissions("from_inputs", {"density", "velocity", "temperature"});
   us_wall_normal_launch = false;
+  us_pump_momentum_sink = false;
   if (Unstructured::active()) {
     const auto& us = Unstructured::get();
     us_wall_normal_launch =
@@ -201,6 +202,12 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
             .doc("Unstructured grids: give recycled neutrals momentum along the wall "
                  "normal? Only its component along the magnetic field is used")
             .withDefault<bool>(true);
+    us_pump_momentum_sink =
+        options["pump_momentum_sink"]
+            .doc("Unstructured grids: do neutrals absorbed by a pump face take their "
+                 "parallel momentum with them? If not, absorption leaves the "
+                 "momentum behind and the remaining atoms speed up")
+            .withDefault<bool>(false);
     us_pump_face.assign(us.nfaces, false);
     const auto pump_faces = us.wallFacesInBoxes(
         options["pump_boxes"]
@@ -215,11 +222,18 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
     output.write("\trecycling: {} pump faces on this processor, {:.4f} m^2\n",
                  pump_faces.size(), pump_area);
   }
-  if (us_wall_normal_launch) {
+  if (us_pump_momentum_sink) {
+    substitutePermissions("to_inputs",
+                          {"AA", "density", "pressure", "temperature", "momentum"});
+  }
+  if (us_wall_normal_launch or us_pump_momentum_sink) {
     substitutePermissions("outputs",
                           {"density_source", "energy_source", "momentum_source"});
   } else {
     substitutePermissions("outputs", {"density_source", "energy_source"});
+  }
+  if (!us_pump_momentum_sink) {
+    substitutePermissions("to_inputs", {"AA", "density", "pressure", "temperature"});
   }
 }
 
@@ -245,6 +259,10 @@ void Recycling::transform_impl(GuardedOptions& state) {
     const Field3D Pn = get<Field3D>(species_to["pressure"]);
     const Field3D Tn = get<Field3D>(species_to["temperature"]);
     const BoutReal AAn = get<BoutReal>(species_to["AA"]);
+
+    // Parallel momentum of the neutrals, for the atoms a pump face absorbs
+    const Field3D NVn = us_pump_momentum_sink ? get<Field3D>(species_to["momentum"])
+                                              : Field3D{0.0};
 
     const Field3D Nnlim = floor(Nn, density_floor);
     const Field3D Pnlim = floor(Pn, pressure_floor);
@@ -284,8 +302,16 @@ void Recycling::transform_impl(GuardedOptions& state) {
       // Ions lost across the field to the wall (anomalous_diffusion with
       // wall_decay_length): flow through each wall face, held in its ghost cell
       const bool has_wall_loss = species_from.isSet("wall_loss_flow");
-      const Field3D wall_loss =
+      Field3D wall_loss =
           has_wall_loss ? get<Field3D>(species_from["wall_loss_flow"]) : Field3D{0.0};
+      // and ions that the E x B drift carries into the wall (drifts_unstructured)
+      if (species_from.isSet("wall_drift_flow")) {
+        wall_loss = has_wall_loss
+                        ? wall_loss + get<Field3D>(species_from["wall_drift_flow"])
+                        : get<Field3D>(species_from["wall_drift_flow"]);
+      }
+      const bool has_any_wall_loss =
+          has_wall_loss or species_from.isSet("wall_drift_flow");
       if (target_recycle) {
         for (int f = 0; f < us.nfaces; f++) {
           if (us.face_kind[f] != Unstructured::wall) {
@@ -300,7 +326,7 @@ void Recycling::transform_impl(GuardedOptions& state) {
           // Ion flow out of the domain through this face
           const BoutReal flow =
               std::max(N(0, g, 0) * V(0, g, 0) * us.flux_over_B[f], 0.0)
-              + (has_wall_loss ? wall_loss(0, g, 0) : 0.0);
+              + (has_any_wall_loss ? wall_loss(0, g, 0) : 0.0);
           const BoutReal particle_source = multiplier * flow / us.vol[c];
           const BoutReal heat_source = particle_source * channel.target_energy;
           channel.target_recycle_density_source(0, i, 0) += particle_source;
@@ -324,12 +350,16 @@ void Recycling::transform_impl(GuardedOptions& state) {
             channel.pump_energy_source(0, i, 0) -= energy_sink;
             density_source(0, i, 0) -= particle_sink;
             energy_source(0, i, 0) -= energy_sink;
+            if (us_pump_momentum_sink) {
+              // The absorbed atoms have the mean velocity of the cell
+              momentum_source(0, i, 0) -= NVn(0, i, 0) * particle_sink / nn;
+            }
           }
         }
       }
       set<Field3D>(species_to["density_source"], density_source);
       set<Field3D>(species_to["energy_source"], energy_source);
-      if (us_wall_normal_launch) {
+      if (us_wall_normal_launch or us_pump_momentum_sink) {
         add(species_to["momentum_source"], momentum_source);
       }
       continue;

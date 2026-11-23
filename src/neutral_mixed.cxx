@@ -923,8 +923,10 @@ void NeutralMixed::finally(const Options& state) {
     // Flat-cell grid: the same equations, with fluxes through cell faces.
     // No flow, conduction or viscous stress through wall faces.
     const auto& us = Unstructured::get();
+    using Scale = Unstructured::Scale;
 
-    ddt(Nn) = -us.Div_par_mod(Nn, Vn, sound_speed) + us.Div_a_Grad_perp(DnnNn, logPnlim);
+    ddt(Nn) = -us.Div_par_mod(Nn, Vn, sound_speed)
+              + us.Div_a_Grad_perp(DnnNn, logPnlim, Scale::logarithm);
     Sn = density_source;
     if (localstate.isSet("density_source")) {
       Sn += get<Field3D>(localstate["density_source"]);
@@ -933,7 +935,7 @@ void NeutralMixed::finally(const Options& state) {
 
     ddt(Pn) = -(5. / 3) * us.Div_par_mod(Pn, Vn, sound_speed)
               + (2. / 3) * Vn * us.Grad_par(Pn)
-              + (5. / 3) * us.Div_a_Grad_perp(DnnPn, logPnlim);
+              + (5. / 3) * us.Div_a_Grad_perp(DnnPn, logPnlim, Scale::logarithm);
     if (neutral_conduction) {
       ddt(Pn) += (2. / 3)
                  * (us.Div_par_K_Grad_par(kappa_n_par, Tn)
@@ -947,10 +949,10 @@ void NeutralMixed::finally(const Options& state) {
 
     if (evolve_momentum) {
       ddt(NVn) = -AA * us.Div_par_fvv(Nnlim, Vn, sound_speed) - us.Grad_par(Pn)
-                 + us.Div_a_Grad_perp(DnnNVn, logPnlim);
+                 + us.Div_a_Grad_perp(DnnNVn, logPnlim, Scale::logarithm);
       if (neutral_viscosity) {
         const Field3D viscosity_source =
-            us.Div_par_K_Grad_par(eta_n_par, Vn) + us.Div_a_Grad_perp(eta_n_perp, Vn);
+            us.Div_par_K_Grad_par(eta_n_par, Vn) + us.Div_a_Grad_perp(eta_n_perp, Vn, Scale::signed_);
         ddt(NVn) += viscosity_source;
         ddt(Pn) += -(2. / 3) * Vn * viscosity_source;
       }

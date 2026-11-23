@@ -26,6 +26,7 @@ private:
   BoutReal density_boundary_mode, pressure_boundary_mode,
       temperature_boundary_mode; ///< BC mode: 0=LimitFree, 1=ExponentialFree, 2=LinearFree
   bool diagnose;                 ///< Save diagnostic variables?
+  BoutReal float_density;        ///< Normalised: sheath floats below this density (with phi)
 
   Field3D hflux_e;              ///< Electron heat loss to the sheath, per volume
   Field3D hflux_i;              ///< Ion heat loss to the sheath (all ions), per volume

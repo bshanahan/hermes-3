@@ -98,6 +98,7 @@ set(HERMES_SOURCES
     src/sheath_boundary_fci.cxx
     src/sheath_boundary_simple.cxx
     src/sheath_boundary_unstructured.cxx
+    src/drifts_unstructured.cxx
     src/unstructured.cxx
     src/sheath_boundary_insulating.cxx
     src/snb_conduction.cxx
@@ -179,6 +180,7 @@ set(HERMES_SOURCES
     include/sheath_boundary_fci.hxx
     include/sheath_boundary_simple.hxx
     include/sheath_boundary_unstructured.hxx
+    include/drifts_unstructured.hxx
     include/unstructured.hxx
     include/wall_puff.hxx
     include/wall_sputtering.hxx

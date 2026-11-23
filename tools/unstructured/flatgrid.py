@@ -21,6 +21,15 @@ All geometry is in SI units and per radian of toroidal angle:
                   where n_v is the value at a vertex of the face          [m]
   us_face_sptr, us_face_scell, us_face_sw
                   (n_v2 - n_v1) as a weighted sum over cells, one CSR row per face
+  us_face_drift   E x B: the volume flow L->R through the face is
+                  drift * (phi_v2 - phi_v1) = (R Bt / B^2) * (phi_v2 - phi_v1),
+                  signed for the direction of the face normal. On a wall face
+                  L->R is out of the plasma                      [m / T]
+  us_face_curl    flux of curl(b / B) through the face from L to R, per radian:
+                  the difference of R Bt / B^2 between the two vertices. The
+                  magnetic (grad-B and curvature) drift carries
+                  (p / q) * curl through the face. Zero on wall faces, and the
+                  values of every cell without a wall face sum to zero  [m / T]
   us_area         poloidal area of the cell                  [m^2]
   us_face_length  poloidal length of the face                [m]
   us_bR, us_bZ    poloidal components of the unit vector along B at the cell
@@ -129,6 +138,17 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
     nrm[flip] *= -1
     flux[flip] *= -1
     dn = np.einsum("ij,ij->i", nrm, d)
+
+    # Drifts. With (R, phi, Z) right-handed and the normal (t_Z, -t_R) of the
+    # face from vertex 1 to vertex 2, the poloidal E x B velocity
+    # (Bt / B^2) e_phi x grad(phi) carries the volume R Bt / B^2 * (phi_2 - phi_1)
+    # through the face, and Stokes' theorem gives the flux of curl(b / B) as
+    # -(R Bt / B^2 at vertex 2 - at vertex 1).
+    orient = np.where(flip, -1.0, 1.0)
+    vB2 = ((vgradpsi**2).sum(1) + rbt**2) / vx**2          # B^2 at the vertices
+    fdrift = orient * rbt / Bf**2
+    fcurl = -orient * rbt * (1.0 / vB2[v2] - 1.0 / vB2[v1])
+    fcurl[face_kind == KIND_WALL] = 0.0
 
     bn = flux / (farea * Bf)  # b . n
     bn_pol = np.clip(flux / (farea * np.maximum(Bp, 1e-30)), -1, 1)  # b_pol-hat . n
@@ -249,6 +269,7 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
         face_L=L, face_R=R, face_flux=flux, face_B=Bf, face_Bp=Bp, face_area=farea, face_dn=dn,
         face_length=length, face_Rmid=mid[:, 0], face_Zmid=mid[:, 1],
         face_kpar=kpar, face_tperp=tperp, face_tiso=tiso, face_kind=face_kind,
+        face_drift=fdrift, face_curl=fcurl,
         face_vperp=vperp, face_viso=viso, face_sptr=sptr, face_scell=scell, face_sw=sw,
         vertex_kind=vertex_kind,
         face_label=np.zeros(nf, int) if face_label is None else np.asarray(face_label, int),
@@ -334,11 +355,13 @@ def _vertex_stencils(P, xc, cells, v1, v2, L, R, face_kind, nreal):
         weights.append((np.array(ids), wts))
     ptr, cell, sw = [0], [], []
     for f in range(len(v1)):
+        # Wall faces have a row too: no gradient is taken across them (their
+        # transmissibilities are zero), but the E x B flow into the wall needs
+        # the potential difference along the face.
         row = {}
-        if face_kind[f] != KIND_WALL:
-            for v, sign in ((v2[f], 1.0), (v1[f], -1.0)):
-                for i, w in zip(*weights[v]):
-                    row[int(i)] = row.get(int(i), 0.0) + sign * w
+        for v, sign in ((v2[f], 1.0), (v1[f], -1.0)):
+            for i, w in zip(*weights[v]):
+                row[int(i)] = row.get(int(i), 0.0) + sign * w
         for i in sorted(row):
             if abs(row[i]) > 1e-14:
                 cell.append(i)
@@ -535,7 +558,10 @@ def write(g, path, extra=None, blocks=48, order="angle"):
         for name, val in (extra or {}).items():
             v = d.createVariable("us_" + name, "f8", ("us_cell",))
             v[:] = cells(name, val)
-        for name in ("flux", "B", "Bp", "area", "length", "dn", "kpar", "tperp", "tiso", "nR", "nZ", "Rmid", "Zmid"):
+        for name in ("flux", "B", "Bp", "area", "length", "dn", "kpar", "tperp", "tiso", "nR", "nZ", "Rmid", "Zmid",
+                     "drift", "curl"):
+            if "face_" + name not in g:
+                continue
             v = d.createVariable("us_face_" + name, "f8", ("us_face",))
             v[:] = g["face_" + name]
         for name in ("L", "R", "kind", "label", "side_L", "side_R", "up", "v1", "v2"):

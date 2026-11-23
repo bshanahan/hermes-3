@@ -93,6 +93,9 @@ AnomalousDiffusion::AnomalousDiffusion(std::string name, Options& alloptions, So
     }
   }
   if (include_D or include_chi) {
+    if (Unstructured::active()) {
+      output_vars.push_back("core_energy_flow");
+    }
     output_vars.push_back("energy_source");
     output_vars.push_back("energy_flow_xlow");
     output_vars.push_back("energy_flow_ylow");
@@ -128,21 +131,29 @@ void AnomalousDiffusion::transform_impl(GuardedOptions& state) {
     const Field3D V3 = species.isSet("velocity")
                            ? GET_NOBOUNDARY(Field3D, species["velocity"])
                            : 0.0;
+    // Energy that leaves the plasma through each core face, for evolve_pressure
+    // (core_power_total): held in the ghost cell of the face
+    Field3D core_flow{zeroFrom(N)};
     if (include_D) {
       const Field3D D{anomalous_D};
       add(species["density_source"], us.Div_a_Grad_perp_upwind(D, N, iso));
       const BoutReal AA = get<BoutReal>(species["AA"]);
       add(species["momentum_source"], us.Div_a_Grad_perp_upwind(AA * V3 * D, N, iso));
-      add(species["energy_source"], us.Div_a_Grad_perp_upwind((3. / 2) * T3 * D, N, iso));
+      add(species["energy_source"],
+          us.Div_a_Grad_perp_upwind((3. / 2) * T3 * D, N, iso, &core_flow));
     }
     if (include_chi) {
       add(species["energy_source"],
-          us.Div_a_Grad_perp_upwind(Field3D{anomalous_chi} * N, T3, iso));
+          us.Div_a_Grad_perp_upwind(Field3D{anomalous_chi} * N, T3, iso, &core_flow));
+    }
+    if (include_D or include_chi) {
+      add(species["core_energy_flow"], core_flow);
     }
     if (include_nu) {
       const BoutReal AA = get<BoutReal>(species["AA"]);
       add(species["momentum_source"],
-          us.Div_a_Grad_perp_upwind(Field3D{anomalous_nu} * AA * N, V3, iso));
+          us.Div_a_Grad_perp_upwind(Field3D{anomalous_nu} * AA * N, V3, iso, nullptr,
+                                     Unstructured::Scale::signed_));
     }
     if (us_wall_inv_length > 0.0) {
       // Cross-field loss to the wall with a decay length. The particle flow

@@ -65,6 +65,7 @@ private:
   /// neutrals are launched along the wall normal
   std::vector<bool> us_pump_face;
   bool us_wall_normal_launch;
+  bool us_pump_momentum_sink; ///< Absorbed neutrals take their momentum with them
 
   bool target_recycle{false}, sol_recycle{false}, pfr_recycle{false},
       neutral_pump{false}; ///< Flags for enabling recycling in different regions

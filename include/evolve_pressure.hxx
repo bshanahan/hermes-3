@@ -80,6 +80,11 @@ private:
 
   BoutReal density_floor;     ///< Minimum density for calculating T
   std::optional<BoutReal> us_core_temperature; ///< Unstructured grids: core boundary value
+  bool us_has_core_power{false};   ///< Unstructured grids: core_power set?
+  bool us_core_power_total{false}; ///< core_power is the total power through the boundary?
+  Field3D us_core_source;           ///< Heating next to the core boundary at full power
+  BoutReal us_core_heating{0.0};    ///< Its energy per unit time and radian (normalised)
+  BoutReal us_core_factor{1.0};     ///< Fraction of it applied
   bool low_n_diffuse_perp;    ///< Cross-field diffusion at low density?
   BoutReal temperature_floor; ///< Low temperature scale for low_T_diffuse_perp
   bool low_T_diffuse_perp;    ///< Add cross-field diffusion at low temperature?

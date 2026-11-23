@@ -286,7 +286,7 @@ int Hermes::init(bool restarting) {
         "sheath_boundary_unstructured", "braginskii_collisions", "braginskii_friction",
         "braginskii_heat_exchange", "braginskii_thermal_force", "braginskii_conduction",
         "electron_force_balance", "recycling", "reactions", "wall_puff", "wall_sputtering",
-        "sound_speed", "set_temperature"};
+        "sound_speed", "set_temperature", "drifts_unstructured"};
     const bool allow_untested =
         Options::root()["unstructured"]["allow_untested_components"]
             .doc("Run components that have not been checked on flat-cell grids?")

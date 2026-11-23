@@ -73,3 +73,63 @@ wall about ten times per ionisation.
 compares a stage-1 run with the recorded numbers: separatrix values, flows and
 the distance of each profile to the measurements. `stage1_two_point.json` is
 the record for `unstructured:skew_correction=false`.
+
+## Carbon variants
+
+| Input | What it changes from `t15_tcvx21_carbon` |
+| --- | --- |
+| `t16_tcvx21_carbon_Ti/BOUT.inp` | every carbon ion evolves its own pressure (`evolve_pressure`) instead of taking the deuterium ion temperature |
+| `t17_tcvx21_carbon_atom_momentum/BOUT.inp` | carbon atoms evolve their parallel momentum; `recycling:pump_momentum_sink = true` so that atoms absorbed by the wall take their momentum with them |
+
+Both restart from the state of `t15_tcvx21_carbon`. For `t16` the restart files
+need the carbon ion pressures (`P = n T_D+`).
+`python tcvx21/carbon_variants.py <label>=<run dir> ...` prints them side by side.
+
+## Drifts
+
+`t18_tcvx21_drifts/BOUT.inp` is stage 1 with the component `drifts_unstructured`
+(see `include/drifts_unstructured.hxx`): E x B and magnetic drifts of every
+charged species through the cell faces, and a potential found from current
+continuity (Ohm's law along the field, sheath currents at the wall, the
+current of the magnetic drifts, and a small anomalous perpendicular current).
+It needs a grid file with the drift geometry (`us_face_drift`, `us_face_curl`
+and vertex stencils on wall faces): `grids/tcvx21_goat_drifts.grd.nc` is the
+standard grid written again with the current `goat_to_bout.py`.
+
+Steps:
+
+1. `python tcvx21/add_phi.py <dir>` adds a first guess of the potential
+   (3 T_e) to the restart files of a stage-1 run.
+2. Run with `drifts:exb_advection=false drifts:magnetic_drift=false` until
+   steady: only the currents act (`potential_only`).
+3. Restart from that state with the drifts on. `unstructured:field_sign = 1` is
+   the field of the grid file, in which the ion grad-B drift points to the
+   X-point (the dataset's forward field); `-1` is the reversed field.
+
+`python tcvx21/drifts.py <run dir> [<reference run>] [figure.png]` prints the
+potential, the current balance and the drift flows.
+
+Checks that can fail:
+
+* `tests/unstructured/test_operators.py`: the drift geometry of the grid file
+  against a quadrature of the analytic field (sign and size), convergence of
+  the E x B flow, conservation.
+* With `drifts:conductivity_factor=1e-12 drifts:perp_mobility=1e-14` and both
+  drifts off, every sheath floats and the run must stay on the stage-1
+  solution (it does, to 0.01%). With the real conductivity it does not: a
+  thermoelectric current of about 220 A flows between the targets.
+
+## Resolution scan
+
+`t19_tcvx21_resolution/<grid>/{nodrift,forward}` repeat stage 1 and the
+forward-field drift case on GOAT grids made with other cell sizes
+(`~/goat/Runs/TCV_X21_<grid>`): `coarse` and `fine` have half and twice the
+cells along each flux tube. `radial` has twice the flux tubes across the
+midplane (GOAT option `gg.radref.LB.Lmaxinf = 0.008`), but its thinnest cells
+are twenty times smaller than those of the standard grid and neither case has
+run on it yet: the implicit solver stays at steps of about 0.1 microseconds,
+failing on the neutral equations.
+A state is moved between grids with `tools/unstructured/regrid_restart.py`.
+`python tcvx21/scan.py <label>=<run dir>::<grid file> ...` prints the runs
+side by side; it picks one cell per flux tube along each measurement line,
+which works at any resolution.

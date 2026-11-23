@@ -175,12 +175,23 @@ EvolvePressure::EvolvePressure(std::string name, Options& alloptions, Solver* so
     const BoutReal p_source = (2. / 3) * power
                               / (TWOPI * volume * std::pow(us.length_norm, 3))
                               / source_normalisation;
-    source.allocate();
+    us_core_source = 0.0;
+    us_core_source.allocate();
     for (int c = 0; c < us.nlocal; c++) {
       if (heated[c] != 0) {
-        source(0, us.ys + c, 0) += p_source;
+        us_core_source(0, us.ys + c, 0) = p_source;
       }
     }
+    // Energy per unit time and radian, normalised like energy_source * volume
+    us_core_heating = 1.5 * p_source * volume;
+    us_has_core_power = true;
+    us_core_power_total =
+        options["core_power_total"]
+            .doc("Unstructured grids: is core_power the total power crossing the core "
+                 "boundary, as in SOLPS-ITER? Then the heating next to the boundary is "
+                 "reduced by the energy that other terms (particle diffusion from a "
+                 "fixed core density, drifts) carry in through it")
+            .withDefault<bool>(true);
     output.write("\t{}: {:e} W into {:.4f} m^3 next to the core boundary\n", name, power,
                  TWOPI * volume * std::pow(us.length_norm, 3));
   }
@@ -301,12 +312,20 @@ void EvolvePressure::transform_impl(GuardedOptions& state) {
     // Ghost cells: zero gradient, except a fixed temperature on the core boundary
     const auto& us = Unstructured::get();
     us.setGhosts(P);
-    if (us_core_temperature) {
-      for (int f = 0; f < us.nfaces; f++) {
-        if (us.face_kind[f] == Unstructured::core) {
-          const int g = us.ys + us.faceR[f];
-          P(0, g, 0) = N(0, g, 0) * (*us_core_temperature);
-        }
+    for (int f = 0; f < us.nfaces; f++) {
+      if (us.face_kind[f] != Unstructured::core) {
+        continue;
+      }
+      const int g = us.ys + us.faceR[f];
+      const int c = us.ys + us.faceL[f];
+      if (us_core_temperature) {
+        P(0, g, 0) = N(0, g, 0) * (*us_core_temperature);
+      } else {
+        // Zero-gradient temperature, so that the core boundary conducts no
+        // heat. (Copying the pressure gives the ghost a different temperature
+        // whenever its density is held fixed, and conduction then carries
+        // heat through the boundary: 59 kW of 160 kW in the TCV-X21 case.)
+        P(0, g, 0) = N(0, g, 0) * P(0, c, 0) / softFloor(N(0, c, 0), density_floor);
       }
     }
   }
@@ -467,6 +486,28 @@ void EvolvePressure::finally(const Options& state) {
     final_source = source;
   }
 
+  if (us_has_core_power) {
+    // Heating next to the core boundary. With core_power_total the energy
+    // that other terms carry in through the boundary is taken off it, so
+    // that the total power crossing the boundary is core_power (SOLPS-ITER).
+    if (us_core_power_total) {
+      const auto& us = Unstructured::get();
+      BoutReal local_out = 0.0; // Out of the plasma through the core faces
+      if (species.isSet("core_energy_flow")) {
+        const Field3D flow = get<Field3D>(species["core_energy_flow"]);
+        for (int f = 0; f < us.nfaces; f++) {
+          if (us.face_kind[f] == Unstructured::core) {
+            local_out += flow(0, us.ys + us.faceR[f], 0);
+          }
+        }
+      }
+      BoutReal out = 0.0;
+      MPI_Allreduce(&local_out, &out, 1, MPI_DOUBLE, MPI_SUM, BoutComm::get());
+      us_core_factor = std::max(0.0, 1.0 + out / us_core_heating);
+    }
+    final_source += us_core_factor * us_core_source;
+  }
+
   Sp = final_source;
   if (species.isSet("energy_source")) {
     Sp += (2. / 3) * get<Field3D>(species["energy_source"]); // For diagnostic output
@@ -558,6 +599,14 @@ void EvolvePressure::outputVars(Options& state) {
                     {"species", name},
                     {"source", "evolve_pressure"}});
 
+    if (us_has_core_power) {
+      set_with_attrs(state[std::string("P") + name + "_core_heating_fraction"],
+                     us_core_factor,
+                     {{"time_dimension", "t"},
+                      {"long_name", name + " core heating as a fraction of core_power "
+                                           "(the rest comes in through the boundary)"},
+                      {"source", "evolve_pressure"}});
+    }
     set_with_attrs(state[std::string("SP") + name], Sp,
                    {{"time_dimension", "t"},
                     {"units", "Pa s^-1"},

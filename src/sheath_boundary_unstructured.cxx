@@ -41,6 +41,7 @@ SheathBoundaryUnstructured::SheathBoundaryUnstructured(std::string name,
                                                        Options& alloptions, Solver*)
     : NamedComponent(name, {
                                readIfSet("species:e:AA"),
+                               readIfSet("fields:phi_unstructured"),
                                writeBoundaryFinal("species:e:{e_boundary}"),
                                readWrite("species:e:energy_source"),
                                writeBoundaryFinalIfSet("species:e:{e_optional}"),
@@ -83,6 +84,12 @@ SheathBoundaryUnstructured::SheathBoundaryUnstructured(std::string name,
   diagnose = options["diagnose"]
                  .doc("Save additional output diagnostics")
                  .withDefault<bool>(false);
+  float_density = options["float_density"]
+                      .doc("With a potential from drifts_unstructured: density [m^-3] below "
+                           "which the sheath goes back to floating (weight n/(n + this)). "
+                           "0: always the cell potential")
+                      .withDefault<BoutReal>(1e17)
+                  / get<BoutReal>(alloptions["units"]["inv_meters_cubed"]);
 
   substitutePermissions("e_boundary", {"density", "temperature"});
   substitutePermissions("e_optional", {"velocity", "momentum"});
@@ -120,6 +127,13 @@ void SheathBoundaryUnstructured::transform_impl(GuardedOptions& state) {
   const auto Ne_b = us.gather(Ne);
   const auto Te_b = us.gather(Te);
   const auto Pe_b = us.gather(Pe);
+
+  // Potential relative to the wall, if it is calculated (drifts_unstructured).
+  // Without it the sheath carries no net current.
+  const bool has_phi =
+      state.isSection("fields") and IS_SET(state["fields"]["phi_unstructured"]);
+  const Field3D phi_field =
+      has_phi ? get<Field3D>(state["fields"]["phi_unstructured"]) : zeroFrom(Ne);
 
   // Wall faces
   std::vector<int> wall;
@@ -191,11 +205,26 @@ void SheathBoundaryUnstructured::transform_impl(GuardedOptions& state) {
     const BoutReal phi = te
                          * log(sqrt(te / (Me * TWOPI)) * (1. - Ge) * floor(ne, 1e-5)
                                / floor(ion_sum[f], 1e-5));
-    const BoutReal phisheath = floor(phi, 0.0); // Electron saturation at phi = phi_wall
+    // Electron saturation at phi = phi_wall
+    const BoutReal phi_floating = floor(phi, 0.0);
+    // (approached smoothly, within about a tenth of T_e, for the implicit solver).
+    // In near-vacuum plasma the sheath goes back to floating (weight
+    // n/(n + float_density)): there exp(delta phi / T_e) makes the electron
+    // loss and heat flux too stiff for the implicit solver.
+    const BoutReal phi_cell = has_phi ? phi_field(0, ys + i, 0) : 0.0;
+    BoutReal phisheath = phi_floating;
+    if (has_phi) {
+      const BoutReal phi_pos = 0.5 * (phi_cell + sqrt(SQ(phi_cell) + SQ(0.1 * te)));
+      const BoutReal w = (float_density > 0.0) ? ne / (ne + float_density) : 1.0;
+      phisheath = w * phi_pos + (1.0 - w) * phi_floating;
+    }
     const BoutReal vesheath = sqrt(te / (TWOPI * Me)) * (1. - Ge) * exp(-phisheath / te);
 
-    // Heat transmitted, less the part carried by advection and kinetic energy
-    BoutReal q = gamma_e * te * ne * vesheath;
+    // Heat transmitted, less the part carried by advection and kinetic energy.
+    // With a net current each electron carries the same heat as without, plus
+    // the difference in the potential it has climbed.
+    BoutReal q =
+        std::max(gamma_e * te + (phisheath - phi_floating), 0.0) * ne * vesheath;
     hflux_e(0, ys + i, 0) -= q * area / us.vol[i];
     q -= (2.5 * te + 0.5 * Me * SQ(vesheath)) * ne * vesheath;
     electron_energy_source(0, ys + i, 0) -= q * area / us.vol[i];
