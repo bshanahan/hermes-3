@@ -34,6 +34,12 @@ NeutralBoundary::NeutralBoundary(std::string name, Options& alloptions,
                "perpendicular to B instead of the surface area?")
           .withDefault<bool>(false);
   pfr = options["neutral_boundary_pfr"].doc("Boundary on PFR?").withDefault<bool>(false);
+  target_surface_area =
+      options["neutral_boundary_target_surface_area"]
+          .doc("Structured grids: at the targets, do neutrals exchange energy with the wall "
+               "over the surface area of the target (orthogonal grids), as on the wall faces "
+               "of an unstructured grid? The default is the area perpendicular to B.")
+          .withDefault<bool>(false);
 
   target_energy_refl_factor = options["target_energy_refl_factor"]
                                   .doc("Fraction of energy retained by neutral particles "
@@ -204,6 +210,11 @@ void NeutralBoundary::transform_impl(GuardedOptions& state) {
                       / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[im])) * 0.5
                       * (coord->dx()[i] + coord->dx()[im]) * 0.5
                       * (coord->dz()[i] + coord->dz()[im]); // [m^2]
+        if (target_surface_area) {
+          // Surface of the target: B / Bpol = sqrt(g_22 g22) times the area
+          // perpendicular to B (orthogonal grids)
+          da *= sqrt(coord->g_22()[i] * coord->g22()[i]);
+        }
 
         // Multiply by area to get energy flow (power)
         BoutReal flow = q * da; // [W]
@@ -266,6 +277,11 @@ void NeutralBoundary::transform_impl(GuardedOptions& state) {
                       / (sqrt(coord->g_22()[i]) + sqrt(coord->g_22()[ip])) * 0.5
                       * (coord->dx()[i] + coord->dx()[ip]) * 0.5
                       * (coord->dz()[i] + coord->dz()[ip]); // [m^2]
+        if (target_surface_area) {
+          // Surface of the target: B / Bpol = sqrt(g_22 g22) times the area
+          // perpendicular to B (orthogonal grids)
+          da *= sqrt(coord->g_22()[i] * coord->g22()[i]);
+        }
 
         // Multiply by area to get energy flow (power)
         BoutReal flow = q * da; // [W]

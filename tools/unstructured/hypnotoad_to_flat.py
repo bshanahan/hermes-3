@@ -15,7 +15,11 @@ import sys
 import numpy as np
 import netCDF4
 from scipy.interpolate import RectBivariateSpline
+from scipy.spatial import cKDTree
 import flatgrid
+
+
+VERTEX_TOLERANCE = 1e-6   # m
 
 
 def convert(gridfile, geqdsk, mxg=2, metric=False):
@@ -43,13 +47,33 @@ def convert(gridfile, geqdsk, mxg=2, metric=False):
     psi_xhigh[-1] = 2 * psixy[-1] - psi_xlow[-1]
     rbt = float(np.mean(np.asarray(d["Btxy"][:]) * np.asarray(d["Rxy"][:])))
 
-    # Unique vertices, matched by position
+    # Unique vertices, matched by position. Hypnotoad computes the corners region by
+    # region, and across the separatrix the same point differs by up to 1e-7 m: points
+    # closer than VERTEX_TOLERANCE are one vertex. (Matching to 1e-9 left the faces
+    # between such cells unmatched, which made them wall faces inside the plasma.)
+    names = ("ll", "lr", "ur", "ul")
+    points = np.concatenate([np.stack([np.asarray(corner[k][0]).ravel(), np.asarray(corner[k][1]).ravel()], 1)
+                             for k in names])
+    group = np.arange(len(points))
+
+    def find(a):
+        while group[a] != a:
+            group[a] = group[group[a]]
+            a = group[a]
+        return a
+
+    for a, b in cKDTree(points).query_pairs(VERTEX_TOLERANCE):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            group[max(ra, rb)] = min(ra, rb)
+    group = np.array([find(a) for a in range(len(points))]).reshape(len(names), nx, ny)
+    group = {k: group[n] for n, k in enumerate(names)}
     vid = {}
     vR, vZ, vpsi = [], [], []
 
     def vertex(name, i, j):
         R, Z = float(corner[name][0][i, j]), float(corner[name][1][i, j])
-        key = (round(R, 9), round(Z, 9))
+        key = int(group[name][i, j])
         if key not in vid:
             vid[key] = len(vR)
             vR.append(R)
@@ -105,6 +129,15 @@ def convert(gridfile, geqdsk, mxg=2, metric=False):
             tubes.append(cell_id[i, :])
 
     vR, vZ, vpsi = np.array(vR), np.array(vZ), np.array(vpsi)
+
+    # Boundary faces can only be where the structured grid has its boundaries
+    kinds = np.array(face_kind)
+    nxr = xe - xs + 1
+    expected = {flatgrid.KIND_CORE: j22 - j11, flatgrid.KIND_WALL: 2 * nxr + ny + (ny - (j22 - j11))}
+    for kind, count in expected.items():
+        if (kinds == kind).sum() != count:
+            raise ValueError("%d boundary faces of kind %d, expected %d: cell corners do not match"
+                             % ((kinds == kind).sum(), kind, count))
 
     # Gradient of psi at the vertices from the equilibrium
     with open(geqdsk) as f:

@@ -195,6 +195,12 @@ Recycling::Recycling(std::string name, Options& alloptions, Solver*)
   substitutePermissions("from_inputs", {"density", "velocity", "temperature"});
   us_wall_normal_launch = false;
   us_pump_momentum_sink = false;
+  pump_target_surface_area =
+      options["pump_target_surface_area"]
+          .doc("Structured grids: do pump cells at the targets absorb neutrals over the "
+               "surface area of the target (orthogonal grids), as the wall faces of an "
+               "unstructured grid do? The default is the area perpendicular to B.")
+          .withDefault<bool>(false);
   if (Unstructured::active()) {
     const auto& us = Unstructured::get();
     us_wall_normal_launch =
@@ -246,6 +252,7 @@ void Recycling::transform_impl(GuardedOptions& state) {
   const auto& dx = coord->dx();
   const auto& dz = coord->dz();
   const auto& g_22 = coord->g_22();
+  const auto& g22 = coord->g22();
 
   for (auto& channel : channels) {
     const GuardedOptions species_from = state["species"][channel.from];
@@ -439,12 +446,16 @@ void Recycling::transform_impl(GuardedOptions& state) {
             // Calculate particle and energy fluxes of neutrals hitting the pump
             // Assume thermal velocity greater than perpendicular velocity and use it for
             // flux calc
-            BoutReal pump_neutral_particle_flow = v_th * nnsheath * daparsheath; // [s^-1]
+            // Area the neutrals arrive on: the target surface is B / Bpol = sqrt(g_22 g22)
+            // times the area perpendicular to B (orthogonal grids)
+            const BoutReal dapump =
+                pump_target_surface_area ? daparsheath * sqrt(g_22[i] * g22[i]) : daparsheath;
+            BoutReal pump_neutral_particle_flow = v_th * nnsheath * dapump; // [s^-1]
             pump_neutral_particle_sink = pump_neutral_particle_flow / volume
                                          * (1 - multiplier); // Particle sink [s^-1 m^-3]
 
             BoutReal pump_neutral_energy_flow =
-                2.0 * tnsheath * v_th * nnsheath * daparsheath; // [W]
+                2.0 * tnsheath * v_th * nnsheath * dapump; // [W]
             pump_neutral_energy_sink =
                 pump_neutral_energy_flow / volume * (1 - multiplier); // heatsink [W m^-3]
 
@@ -533,12 +544,16 @@ void Recycling::transform_impl(GuardedOptions& state) {
             // Calculate particle and energy fluxes of neutrals hitting the pump
             // Assume thermal velocity greater than perpendicular velocity and use it for
             // flux calc
-            BoutReal pump_neutral_particle_flow = v_th * nnsheath * daparsheath; // [s^-1]
+            // Area the neutrals arrive on: the target surface is B / Bpol = sqrt(g_22 g22)
+            // times the area perpendicular to B (orthogonal grids)
+            const BoutReal dapump =
+                pump_target_surface_area ? daparsheath * sqrt(g_22[i] * g22[i]) : daparsheath;
+            BoutReal pump_neutral_particle_flow = v_th * nnsheath * dapump; // [s^-1]
             pump_neutral_particle_sink = pump_neutral_particle_flow / volume
                                          * (1 - multiplier); // Particle sink [s^-1 m^-3]
 
             BoutReal pump_neutral_energy_flow =
-                2.0 * tnsheath * v_th * nnsheath * daparsheath; // [W]
+                2.0 * tnsheath * v_th * nnsheath * dapump; // [W]
             pump_neutral_energy_sink =
                 pump_neutral_energy_flow / volume * (1 - multiplier); // heatsink [W m^-3]
 

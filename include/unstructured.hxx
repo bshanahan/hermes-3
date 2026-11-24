@@ -73,7 +73,10 @@ public:
   std::vector<int> sideL, sideR;     ///< +1 if the other cell is `next`, -1 if `prev`, else 0
   std::vector<int> face_up;          ///< Boundary faces: cell upstream of L, or -1
   std::vector<BoutReal> flux_over_B; ///< Magnetic flux from L to R, divided by |B|
-  std::vector<BoutReal> kpar;        ///< Parallel transmissibility
+  std::vector<BoutReal> kpar;        ///< Parallel transmissibility (two-point gradient)
+  /// Parallel conduction from the diamond gradient: centre and vertex coefficients
+  std::vector<BoutReal> kparn, vpar;
+  bool parallel_correction{false};   ///< Use kparn, vpar instead of kpar
   std::vector<BoutReal> tperp;       ///< Radial transmissibility
   std::vector<BoutReal> tiso;        ///< Transmissibility for the whole of grad_perp
   std::vector<BoutReal> face_area;   ///< Surface area per radian

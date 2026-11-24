@@ -269,7 +269,14 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
           .doc("Sign of the toroidal field in the drifts: -1 reverses the field "
                "relative to the grid file. Parallel transport is not affected")
           .withDefault<BoutReal>(1.0);
-  if (us.skew_correction or us.has_drifts) {
+  us.parallel_correction =
+      Options::root()["unstructured"]["parallel_correction"]
+          .doc("Parallel conduction from the gradient of the diamond (cell centres and "
+               "face vertices) rather than from the two cell centres alone. The "
+               "two-point form carries heat across flux surfaces on cells that are "
+               "not aligned with the field (triangles).")
+          .withDefault<bool>(has_stencils and mesh->sourceHasVar("us_face_vpar"));
+  if (us.skew_correction or us.has_drifts or us.parallel_correction) {
     all_sptr = getInts(mesh, "us_face_sptr", nfaces + 1);
     all_scell = getInts(mesh, "us_face_scell", all_sptr[nfaces]);
     all_sw = getReals(mesh, "us_face_sw", all_sptr[nfaces], 1.0);
@@ -428,7 +435,16 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
       us.face_curl[i] *= us.field_sign;
     }
   }
-  if (us.skew_correction or us.has_drifts) {
+  if (us.parallel_correction) {
+    if (!has_stencils or !mesh->sourceHasVar("us_face_vpar")) {
+      throw BoutException("unstructured:parallel_correction needs us_face_kparn and "
+                          "us_face_vpar in the grid file "
+                          "(tools/unstructured/add_parallel_correction.py)");
+    }
+    us.kparn = pick(getReals(mesh, "us_face_kparn", nfaces, L), faces);
+    us.vpar = pick(getReals(mesh, "us_face_vpar", nfaces, L), faces);
+  }
+  if (us.skew_correction or us.has_drifts or us.parallel_correction) {
     us.vperp = pick(getReals(mesh, "us_face_vperp", nfaces, L), faces);
     us.viso = pick(getReals(mesh, "us_face_viso", nfaces, L), faces);
     us.sptr.assign(1, 0);
@@ -489,10 +505,12 @@ void Unstructured::initialise(Mesh* mesh, BoutReal rho_s0, BoutReal Bnorm) {
 
   output.write("Unstructured grid: {} cells, {} ghost cells, {} faces in total; "
                "{} cells, {} halo cells and {} faces on this processor. "
-               "Skew correction {} (bound: limit {}, smooth {}, {} scale, power {})\n",
+               "Skew correction {} (bound: limit {}, smooth {}, {} scale, power {}). "
+               "Parallel conduction from the {} gradient\n",
                nreal, nghost, nfaces, us.nlocal, halo.size(), us.nfaces,
                us.skew_correction ? "on" : "off", us.skew_limit, us.skew_smooth,
-               us.skew_harmonic ? "per-field" : "arithmetic", us.skew_power);
+               us.skew_harmonic ? "per-field" : "arithmetic", us.skew_power,
+               us.parallel_correction ? "diamond" : "two-point");
   instance = std::move(us);
 }
 
@@ -698,7 +716,16 @@ Field3D Unstructured::Div_par_K_Grad_par(const Field3D& K_in, const Field3D& f_i
     }
     const int L = faceL[i];
     const int R = faceR[i];
-    const BoutReal flow = 0.5 * (K[L] + K[R]) * kpar[i] * (f[R] - f[L]); // Into L
+    BoutReal gradient = kpar[i] * (f[R] - f[L]);
+    if (parallel_correction) {
+      // Not bounded: on a cell that is not aligned with the field the vertex term
+      // has to cancel the cross-field part of the centre term in full
+      gradient = kparn[i] * (f[R] - f[L]);
+      if (vpar[i] != 0.0) {
+        gradient += vpar[i] * vertexDifference(f, i);
+      }
+    }
+    const BoutReal flow = 0.5 * (K[L] + K[R]) * gradient; // Into L
     if (L < nlocal) {
       result(0, ys + L, 0) += flow / vol[L];
     }

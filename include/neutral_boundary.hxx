@@ -43,6 +43,7 @@ private:
   bool upper_y; ///< Boundary condition at upper y?
   bool sol;     ///< Boundary condition at sol?
   bool us_projected_area; ///< Unstructured grids: area perpendicular to B at targets
+  bool target_surface_area; ///< Structured grids: surface area of the target, not the area perpendicular to B
   bool pfr;     ///< Boundary condition at pfr?
 
   ///

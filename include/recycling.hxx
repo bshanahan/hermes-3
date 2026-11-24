@@ -66,6 +66,9 @@ private:
   std::vector<bool> us_pump_face;
   bool us_wall_normal_launch;
   bool us_pump_momentum_sink; ///< Absorbed neutrals take their momentum with them
+  /// Structured grids: target pumps absorb neutrals over the surface area of the target
+  /// (as the wall faces of an unstructured grid do), not over the area perpendicular to B
+  bool pump_target_surface_area{false};
 
   bool target_recycle{false}, sol_recycle{false}, pfr_recycle{false},
       neutral_pump{false}; ///< Flags for enabling recycling in different regions

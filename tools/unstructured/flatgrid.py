@@ -19,6 +19,10 @@ All geometry is in SI units and per radian of toroidal angle:
   us_face_vperp, us_face_viso
                   skew correction: the flow gains -D * vperp * (n_v2 - n_v1),
                   where n_v is the value at a vertex of the face          [m]
+  us_face_kparn, us_face_vpar
+                  parallel conduction with the gradient of the diamond (two cell
+                  centres, two vertices) instead of kpar:
+                  flow L->R = -kappa * (kparn * (T_R - T_L) + vpar * (T_v2 - T_v1)) [m]
   us_face_sptr, us_face_scell, us_face_sw
                   (n_v2 - n_v1) as a weighted sum over cells, one CSR row per face
   us_face_drift   E x B: the volume flow L->R through the face is
@@ -172,6 +176,18 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
     viso = farea * np.einsum("ij,ij->i", n_iso, beta)
     vperp[face_kind == KIND_WALL] = 0.0
     viso[face_kind == KIND_WALL] = 0.0
+    # Parallel conduction from the same diamond gradient: the flow of heat through a
+    # face is kappa (Phi / B) b.G. The two-point form (kpar above) takes b.G from the
+    # two cell centres alone, which is right only where the line joining them lies
+    # along the poloidal field (aligned quadrilaterals); on triangles it mixes in the
+    # gradient across the flux surfaces.
+    # Between two quadrilaterals of one flux tube the two-point form is kept: it is
+    # zero for any temperature that is constant along the tube, whatever the ratio
+    # of parallel to cross-field conduction, which the vertex term cannot guarantee.
+    nvert = np.array([len(c) for c in cells])
+    skewed = (face_kind == KIND_INTERIOR) & ((nvert[L] != 4) | (nvert[np.minimum(R, nreal - 1)] != 4))
+    kparn = np.where(skewed, (flux / Bf) * bn / dn, kpar)
+    vpar = np.where(skewed, (flux / Bf) * np.einsum("ij,ij->i", bpol, beta) / Bf, 0.0)
     sptr, scell, sw, vertex_kind = _vertex_stencils(P, xc, cells, v1, v2, L, R, face_kind, nreal)
 
     side_L = np.where(R == nxt[np.minimum(L, nreal - 1)], 1, np.where(R == prev[np.minimum(L, nreal - 1)], -1, 0))
@@ -270,7 +286,8 @@ def build(vx, vy, vpsi, vgradpsi, rbt, cells, tubes, face_vx, face_cells, face_k
         face_length=length, face_Rmid=mid[:, 0], face_Zmid=mid[:, 1],
         face_kpar=kpar, face_tperp=tperp, face_tiso=tiso, face_kind=face_kind,
         face_drift=fdrift, face_curl=fcurl,
-        face_vperp=vperp, face_viso=viso, face_sptr=sptr, face_scell=scell, face_sw=sw,
+        face_vperp=vperp, face_viso=viso, face_kparn=kparn, face_vpar=vpar,
+        face_sptr=sptr, face_scell=scell, face_sw=sw,
         vertex_kind=vertex_kind,
         face_label=np.zeros(nf, int) if face_label is None else np.asarray(face_label, int),
         face_side_L=side_L, face_side_R=side_R, face_up=up,
@@ -570,7 +587,9 @@ def write(g, path, extra=None, blocks=48, order="angle"):
         if "face_sptr" in g:
             d.createDimension("us_faceptr", g["nfaces"] + 1)
             d.createDimension("us_stencil", len(g["face_scell"]))
-            for name in ("vperp", "viso"):
+            for name in ("vperp", "viso", "kparn", "vpar"):
+                if "face_" + name not in g:
+                    continue
                 v = d.createVariable("us_face_" + name, "f8", ("us_face",))
                 v[:] = g["face_" + name]
             v = d.createVariable("us_face_sptr", "i4", ("us_faceptr",))
