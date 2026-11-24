@@ -9,7 +9,11 @@ face list in the grid file; see `include/unstructured.hxx` and the header of
 | File | Purpose |
 | --- | --- |
 | `flatgrid.py` | writes a flat-cell grid file from cells, faces and a psi map |
+| `geqdsk_to_rzpsi.py` | writes GOAT's equilibrium input (`rzpsi.dat`) from a G-EQDSK file, checking the units of psi |
 | `goat_to_bout.py` | converts a GOAT grid (`traduit.out.b2us`) to a flat-cell grid |
+| `goat_cut.py` | a GOAT grid restricted to a range of poloidal flux |
+| `regrid_restart.py` | copies the state of a run onto the restart files of another run, on another grid or process count |
+| `add_parallel_correction.py` | adds the parallel-conduction coefficients to a grid file written before they existed |
 | `b2us.py` | reader for `traduit.out.b2us` |
 | `hypnotoad_to_flat.py` | recasts a structured hypnotoad grid as a flat-cell grid with the same cells, for verification |
 | `compare_same_cells.py` | compares a structured run with a flat-cell run on the same cells |
@@ -32,7 +36,8 @@ It touches `src/solver/impls/snes/snes.cxx` and
 
 A flat-cell run uses the ordinary components plus
 `sheath_boundary_unstructured` and, for gas valves, `wall_puff`.
-`us_runs/t12_tcvx21/BOUT.inp.stage1` is a complete example.
+`examples/unstructured` has a complete SPARC case with instructions from
+download to results; `us_runs/t12_tcvx21/BOUT.inp.stage1` is a TCV case.
 
 ## Cross-field operators on skewed cells
 
